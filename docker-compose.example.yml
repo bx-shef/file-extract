@@ -1,0 +1,55 @@
+# Пример подключения сервиса к своему стеку. Умолчания — под ВМ портала Битрикс24 (одно ядро,
+# мало памяти). Порт наружу НЕ публикуется: сервис доступен только соседям по внутренней сети
+# `extract` по адресу http://file-extract:3000/v1/extract.
+# ⚠ Изоляция (сеть без выхода, лимиты памяти и процессов, сброс прав) действует ТОЛЬКО при запуске
+# по этому примеру (или по `docker run` из README) — сам код её не обеспечивает.
+services:
+  file-extract:
+    # Образ — по тегу коммита, а не :latest: движущийся тег подменил бы версию молча.
+    image: ghcr.io/bx-shef/file-extract:${FILE_EXTRACT_TAG:?задайте FILE_EXTRACT_TAG — sha коммита образа}
+    restart: unless-stopped
+    environment:
+      EXTRACT_API_KEY: ${EXTRACT_API_KEY:?задайте EXTRACT_API_KEY}
+      # Один разбор за раз и короткая очередь: на ВМ портала одно ядро на сервис.
+      MAX_CONCURRENCY: "1"
+      MAX_QUEUE: "4"
+      CACHE_DIR: /cache
+      # Меньше размера tmpfs /cache ниже — с запасом на временные файлы записи.
+      CACHE_MAX_BYTES: "201326592"
+      # REDIS_URL НЕ задан намеренно: кеш — в tmpfs /cache (память, пропадает при перезапуске).
+      # ⚠ НЕ подключайте общий Redis MCP-сервера: у него AOF на диск, noeviction и 64 МБ —
+      # кеш с персональными данными записался бы на диск, а при заполнении выдавил бы токены
+      # (noeviction — отказ записи им же). Свой Redis — только без тома и без AOF (см. ниже).
+    # Файловая система только для чтения; писать можно лишь в tmpfs. Оба — noexec,nosuid,nodev:
+    # из разбираемого файла нечего и некуда запускать.
+    read_only: true
+    tmpfs:
+      # Разбираемые файлы, профиль LibreOffice, страницы скана.
+      - /tmp:size=1g,mode=1777,noexec,nosuid,nodev
+      # Дисковый кеш на сутки (память). Размер — потолок памяти под кеш.
+      - /cache:size=256m,mode=0700,uid=1000,gid=1000,noexec,nosuid,nodev
+    # Лимиты: память — главная граница против zip/XML-бомб (лимита на отдельный процесс нет,
+    # только на контейнер), pids — против размножения процессов.
+    mem_limit: 1536m
+    pids_limit: 256
+    cpus: 1
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - extract
+    # Пример: сервис-потребитель тоже подключается к сети `extract`.
+
+  # Необязательно: СВОЙ Redis под кеш вместо tmpfs. Без тома и без AOF — данные не переживают
+  # перезапуск, и это нарочно: в кеше персональные данные, срок 24 часа.
+  # file-extract-redis:
+  #   image: redis:7-alpine
+  #   command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+  #   read_only: true
+  #   networks: [extract]
+
+networks:
+  extract:
+    # internal: у сети нет выхода наружу — разбираемый файл не может ничего никуда отправить.
+    internal: true

@@ -1,0 +1,19 @@
+# Обновления зависимостей: npm, закреплённые по SHA actions и digest базового образа.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    ignore:
+      # Мажор Node — осознанно и отдельно (engines, --experimental-strip-types).
+      - dependency-name: node
+        update-types: ["version-update:semver-major"]
