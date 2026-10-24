@@ -153,6 +153,27 @@ describe('HTTP: POST /extract', () => {
     const { extract } = await start({ cache: broken })
     expect((await extract('x', 'a.txt')).status).toBe(200)
   })
+  it('испорченная запись кеша — промах и новый разбор, а не 500', async () => {
+    const cache = memCache()
+    const { extract } = await start({ cache })
+    expect((await extract('abc', 'a.txt')).status).toBe(200)
+    for (const k of cache.map.keys()) cache.map.set(k, '{"text":')
+    const r = await extract('abc', 'a.txt')
+    expect(r.status).toBe(200)
+    expect((await r.json()).cached).toBe(false)
+  })
+  it('не создался временный каталог — место в очереди освобождается', async () => {
+    const { extract } = await start({ config: { maxConcurrency: 1, queueTimeoutMs: 200 } })
+    const old = process.env.TMPDIR
+    process.env.TMPDIR = '/nonexistent-file-extract-tmp'
+    try {
+      expect((await extract('один', 'a.txt')).status).toBe(500)
+      expect((await extract('два', 'a.txt')).status).toBe(500) // не 503 busy: слот не утёк
+    } finally {
+      if (old === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = old
+    }
+    expect((await extract('три', 'a.txt')).status).toBe(200)
+  })
   it('в журнал не попадают ни имя файла, ни текст', async () => {
     const logs: LogEntry[] = []
     const { extract } = await start({ logs })

@@ -118,10 +118,9 @@ export function createApp(deps: AppDeps): Server {
     const key = cacheKey(sha, plan.kind, EXTRACTOR_VERSION)
 
     const hit = await cache.get(key).catch(() => null) // недоступный кеш — не повод отказать
-    if (hit) {
-      const parsed = JSON.parse(hit) as Omit<ExtractResponse, 'cached'>
-      return { ...parsed, cached: true }
-    }
+    // испорченная запись кеша (обрыв записи на диск, чужое значение в Redis) — как промах, а не 500 на сутки
+    const parsed = hit ? safeParse(hit) : null
+    if (parsed) return { ...parsed, cached: true }
 
     let release: () => void
     try {
@@ -130,10 +129,12 @@ export function createApp(deps: AppDeps): Server {
       if (e instanceof QueueTimeoutError) throw new HttpError(503, 'busy', 'сервис занят, повторите позже')
       throw e
     }
-    const dir = await mkdtemp(join(tmpdir(), 'file-extract-in-'))
+    // место в очереди отдаём в finally — и если не создался даже временный каталог
+    let dir: string | undefined
     const ac = new AbortController()
     const timer = setTimeout(() => ac.abort(), config.extractTimeoutMs)
     try {
+      dir = await mkdtemp(join(tmpdir(), 'file-extract-in-'))
       const input = join(dir, `input.${plan.ext}`)
       await writeFile(input, body, { mode: 0o600 })
       const r = await Promise.race([
@@ -159,8 +160,15 @@ export function createApp(deps: AppDeps): Server {
       clearTimeout(timer)
       ac.abort() // добить дочерние процессы, если разбор ещё что-то держит
       release()
-      await rm(dir, { recursive: true, force: true }).catch(() => {})
+      if (dir) await rm(dir, { recursive: true, force: true }).catch(() => {})
     }
+  }
+
+  function safeParse(raw: string): Omit<ExtractResponse, 'cached'> | null {
+    try {
+      const v = JSON.parse(raw)
+      return v && typeof v.text === 'string' && Array.isArray(v.sheets) ? v : null
+    } catch { return null }
   }
 
   return createServer((req, res) => {
