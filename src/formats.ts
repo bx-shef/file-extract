@@ -21,5 +21,8 @@ export const SUPPORTED_EXT = Object.keys(EXT_KIND) as readonly string[]
 /** Выбрать способ разбора по расширению имени файла (без учёта регистра). */
 export function planExtraction(fileName: string): ExtractPlan {
   const ext = (fileName.split('.').pop() ?? '').toLowerCase().trim()
-  return { kind: EXT_KIND[ext] ?? 'unsupported', ext }
+  // Object.hasOwn, а не EXT_KIND[ext]: `x.constructor`, `x.__proto__`, `x.toString` иначе
+  // достали бы унаследованные свойства объекта вместо 'unsupported'.
+  const kind = Object.hasOwn(EXT_KIND, ext) ? EXT_KIND[ext]! : 'unsupported'
+  return { kind, ext }
 }

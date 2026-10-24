@@ -16,13 +16,31 @@ export interface CacheStore {
   close?: () => Promise<void>
 }
 
+export interface CacheKeyInput {
+  /** sha256 файла. */
+  sha: string
+  /** Способ разбора (text/pdf/office/image). */
+  kind: string
+  /** Расширение: одни и те же байты под `.xls` и `.doc` LibreOffice выгружает разными
+   *  фильтрами (CSV против текста) — результат разный. */
+  ext: string
+  /** Потолок текста: обрезка идёт ДО кеширования, и запись при другом потолке была бы чужой. */
+  maxTextChars: number
+  /** Версия разборщика — чтобы после правки разбора старый результат не отдавался. */
+  version: string
+}
+
+/** Версия формы ключа: поднимается, когда меняется набор полей ниже. */
+const KEY_FORMAT = 'k2'
+
 /**
- * Ключ кеша: sha256(версия разборщика + способ разбора + sha256 файла).
- * Версия — чтобы после правки разбора старый результат не отдавался. Способ — потому что одни
- * и те же байты под именем `.txt` и `.csv` разбираются одинаково, а под `.pdf` и `.png` — нет.
+ * Ключ кеша: sha256 от всех входов, от которых зависит ответ (см. CacheKeyInput).
+ * Способ — потому что одни и те же байты под `.txt` и `.pdf` разбираются по-разному.
  */
-export function cacheKey(fileSha: string, kind: string, version: string): string {
-  return createHash('sha256').update(`${version}\n${kind}\n${fileSha}`).digest('hex')
+export function cacheKey(k: CacheKeyInput): string {
+  return createHash('sha256')
+    .update([KEY_FORMAT, k.version, k.kind, k.ext, String(k.maxTextChars), k.sha].join('\n'))
+    .digest('hex')
 }
 
 /** Срок в секундах не длиннее суток — защита от опечатки в вызывающем. */
@@ -30,19 +48,60 @@ function clampTtl(ttlSec: number): number {
   return Math.min(Math.max(1, Math.floor(ttlSec)), CACHE_TTL_SEC)
 }
 
+/** Потолок дискового кеша по умолчанию: tmpfs под кеш в compose того же размера. */
+export const DEFAULT_CACHE_MAX_BYTES = 256 * 1024 * 1024
+
+export interface DiskCacheOptions {
+  now?: () => number
+  /** Потолок суммарного размера записей. Сверх него вытесняются записи, истекающие раньше. */
+  maxBytes?: number
+}
+
 /**
  * Кеш на диске: файл на ключ, срок — по mtime. Просроченное удаляется при чтении и при
- * `sweep()` (раз в час). `now` внедряется ради тестов.
+ * `sweep()` (раз в час). После записи суммарный размер сверяется с `maxBytes`: без потолка
+ * кеш на tmpfs съел бы память контейнера (tmpfs — это память), а Redis держит свой maxmemory.
  */
-export function diskCache(dir: string, now: () => number = Date.now): CacheStore {
+export function diskCache(dir: string, opts: DiskCacheOptions = {}): CacheStore {
+  const now = opts.now ?? Date.now
+  const maxBytes = opts.maxBytes ?? DEFAULT_CACHE_MAX_BYTES
   let ready: Promise<unknown> | null = null
-  const ensure = (): Promise<unknown> => (ready ??= mkdir(dir, { recursive: true, mode: 0o700 }))
+  // При ошибке mkdir обещание сбрасывается: иначе один сбой (каталог ещё не смонтирован)
+  // навсегда закрыл бы запись в кеш до перезапуска.
+  const ensure = (): Promise<unknown> => (ready ??= mkdir(dir, { recursive: true, mode: 0o700 }).catch((e: unknown) => {
+    ready = null
+    throw e
+  }))
   const file = (key: string): string => {
     if (!/^[0-9a-f]{64}$/.test(key)) throw new Error('неверный ключ кеша')
     return join(dir, `${key}.json`)
   }
   // Срок записи хранится в mtime как «момент истечения»: так sweep не нужно знать TTL.
   const expired = (mtimeMs: number): boolean => mtimeMs <= now()
+
+  /** Вытеснить записи, истекающие раньше всех, пока сумма не уложится в потолок. */
+  async function enforceCap(): Promise<void> {
+    let names: string[]
+    try { names = await readdir(dir) } catch { return }
+    const entries: Array<{ f: string, size: number, exp: number }> = []
+    let total = 0
+    for (const n of names) {
+      if (!n.endsWith('.json')) continue
+      const f = join(dir, n)
+      try {
+        const st = await stat(f)
+        entries.push({ f, size: st.size, exp: st.mtimeMs })
+        total += st.size
+      } catch { /* исчез */ }
+    }
+    if (total <= maxBytes) return
+    entries.sort((a, b) => a.exp - b.exp)
+    for (const e of entries) {
+      if (total <= maxBytes) break
+      await rm(e.f, { force: true }).catch(() => {})
+      total -= e.size
+    }
+  }
 
   return {
     async get(key) {
@@ -59,6 +118,8 @@ export function diskCache(dir: string, now: () => number = Date.now): CacheStore
       }
     },
     async set(key, value, ttlSec) {
+      // Запись больше всего потолка не кешируем вовсе: она вытеснила бы всё и себя.
+      if (Buffer.byteLength(value) > maxBytes) return
       await ensure()
       const f = file(key)
       const tmp = `${f}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`
@@ -66,6 +127,7 @@ export function diskCache(dir: string, now: () => number = Date.now): CacheStore
       const exp = (now() + clampTtl(ttlSec) * 1000) / 1000
       await utimes(tmp, exp, exp)
       await rename(tmp, f)
+      await enforceCap()
     },
     async sweep() {
       let removed = 0

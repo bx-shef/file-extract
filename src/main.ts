@@ -23,18 +23,19 @@ async function main(): Promise<void> {
     const { Redis } = await import('ioredis')
     cache = redisCache(new Redis(config.redisUrl, { maxRetriesPerRequest: 1, enableOfflineQueue: false, lazyConnect: false }))
   } else {
-    cache = diskCache(config.cacheDir)
+    cache = diskCache(config.cacheDir, { maxBytes: config.cacheMaxBytes })
   }
 
   const sweep = (): void => {
     cache.sweep().then((removed) => {
       if (removed) stdoutLogger({ evt: 'cache_sweep', removed })
-    }).catch(() => {})
+    }).catch(() => { stdoutLogger({ evt: 'cache_sweep_failed' }) })
   }
   sweep()
   setInterval(sweep, SWEEP_INTERVAL_MS).unref()
 
   const server = createApp({ config, runners: liveExtractRunners, cache, log: stdoutLogger })
+  // Запрос живёт не дольше ожидания в очереди + разбора + запаса на приём тела и ответ.
   server.requestTimeout = config.extractTimeoutMs + config.queueTimeoutMs + 30_000
   server.listen(config.port, config.host, () => {
     stdoutLogger({ evt: 'start', version: EXTRACTOR_VERSION })

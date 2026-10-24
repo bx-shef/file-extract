@@ -13,6 +13,11 @@ describe('planExtraction', () => {
     expect(planExtraction('archive.zip').kind).toBe('unsupported')
     expect(planExtraction('noext').kind).toBe('unsupported')
   })
+  it('унаследованные свойства объекта — не формат', () => {
+    for (const n of ['x.constructor', 'x.__proto__', 'x.toString', 'x.hasOwnProperty', 'x.valueOf']) {
+      expect(planExtraction(n).kind).toBe('unsupported')
+    }
+  })
   it('у каждого расширения из SUPPORTED_EXT есть способ разбора', () => {
     for (const e of SUPPORTED_EXT) expect(planExtraction(`f.${e}`).kind).not.toBe('unsupported')
     for (const e of ['txt', 'csv', 'tsv', 'pdf', 'doc', 'docx', 'xls', 'xlsx', 'odt', 'ods', 'rtf', 'png', 'jpg']) {

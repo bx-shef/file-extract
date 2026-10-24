@@ -1,8 +1,9 @@
 import { spawn } from 'node:child_process'
-import { mkdtemp, open, readdir, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, open, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { basename, join } from 'node:path'
+import { basename, dirname, join, resolve, sep } from 'node:path'
 import { ExtractError } from './errors.ts'
+import { imageSize, MAX_IMAGE_PIXELS } from './imageSize.ts'
 import type { ExtractRunners, OcrOutput, OfficeOutput, Sheet } from './textExtract.ts'
 
 // Живые исполнители разбора (дочерние процессы). Программы ставятся в образ:
@@ -47,16 +48,41 @@ export function subprocessEnv(
 }
 
 /**
- * Запустить программу и вернуть её stdout. По таймауту процесса или по сигналу прерывания
- * (таймаут на файл) убиваем ВСЮ группу процессов: libreoffice порождает soffice.bin, и
- * убийство одного родителя оставило бы ребёнка жить.
+ * Окружение «дома» процесса: HOME и каталоги XDG — рабочий каталог разбора. Иначе LibreOffice
+ * и fontconfig писали бы кеши и профиль в общий $HOME (у пользователя образа его нет, а на
+ * машине разработчика это чужой профиль). Чистая.
  */
-function run(bin: string, args: string[], signal: AbortSignal, env?: Record<string, string>): Promise<string> {
+export function isolatedHome(dir: string): Record<string, string> {
+  return {
+    HOME: dir,
+    XDG_CONFIG_HOME: join(dir, '.config'),
+    XDG_CACHE_HOME: join(dir, '.cache'),
+    XDG_DATA_HOME: join(dir, '.local', 'share'),
+    XDG_RUNTIME_DIR: dir,
+    TMPDIR: dir
+  }
+}
+
+interface RunOptions {
+  /** Рабочий каталог разбора: cwd процесса и его HOME/XDG/TMPDIR. */
+  dir: string
+  /** Дополнительные несекретные переменные (локаль). */
+  env?: Record<string, string>
+}
+
+/**
+ * Запустить программу и вернуть её stdout. По таймауту процесса или по сигналу прерывания
+ * (таймаут на файл, ушедший клиент) убиваем ВСЮ группу процессов: libreoffice порождает
+ * soffice.bin, и убийство одного родителя оставило бы ребёнка жить. Группа добивается и при
+ * обычном завершении — на случай потомка, пережившего родителя.
+ */
+function run(bin: string, args: string[], signal: AbortSignal, opts: RunOptions): Promise<string> {
   return new Promise((resolve, reject) => {
     if (signal.aborted) return reject(new ExtractError('timeout', 'разбор прерван по таймауту'))
     const child = spawn(bin, args, {
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: subprocessEnv(process.env, env),
+      cwd: opts.dir,
+      env: subprocessEnv(process.env, { ...isolatedHome(opts.dir), ...opts.env }),
       detached: true
     })
     const out: Buffer[] = []
@@ -67,7 +93,7 @@ function run(bin: string, args: string[], signal: AbortSignal, env?: Record<stri
       try {
         if (child.pid) process.kill(-child.pid, 'SIGKILL')
       } catch {
-        child.kill('SIGKILL')
+        try { child.kill('SIGKILL') } catch { /* уже нет */ }
       }
     }
     const finish = (e: Error | null, v?: string): void => {
@@ -75,22 +101,21 @@ function run(bin: string, args: string[], signal: AbortSignal, env?: Record<stri
       done = true
       clearTimeout(timer)
       signal.removeEventListener('abort', onAbort)
+      killGroup()
       if (e) reject(e)
       else resolve(v ?? '')
     }
     const onAbort = (): void => {
-      killGroup()
       finish(new ExtractError('timeout', 'разбор прерван по таймауту'))
     }
     signal.addEventListener('abort', onAbort, { once: true })
     const timer = setTimeout(() => {
-      killGroup()
       finish(new ExtractError('timeout', `${bin}: превышено время работы`))
     }, RUN_TIMEOUT_MS)
     child.stdout.on('data', (d: Buffer) => {
+      if (done) return // после отказа вывод больше не копим
       outLen += d.length
       if (outLen > MAX_STDOUT_BYTES) {
-        killGroup()
         finish(new ExtractError('too_complex', `${bin}: слишком большой вывод`))
         return
       }
@@ -123,6 +148,42 @@ export function decodeBytes(buf: Uint8Array): string {
 async function decodeText(path: string): Promise<string> {
   return decodeBytes(await readFile(path))
 }
+
+/** Потолок одного CSV листа на диске: больше — отказ до чтения в память. */
+export const MAX_SHEET_CSV_BYTES = 50 * 1024 * 1024
+
+async function readSheetCsv(path: string): Promise<string> {
+  const st = await stat(path)
+  if (st.size > MAX_SHEET_CSV_BYTES) {
+    throw new ExtractError('too_complex', `слишком большой лист таблицы (> ${MAX_SHEET_CSV_BYTES} байт)`)
+  }
+  return decodeText(path)
+}
+
+/**
+ * Настройки свежего профиля LibreOffice (`registrymodifications.xcu`). Ключи сверены по схеме
+ * установленного LibreOffice 24.2 (`share/registry/main.xcd`):
+ * - Common/Security/Scripting: MacroSecurityLevel=3 (очень высокий), DisableMacrosExecution —
+ *   макросы чужого документа не выполняются;
+ * - Common/Security/Scripting/BlockUntrustedRefererLinks — не загружать ссылки из документа
+ *   (внешние картинки). ПРОВЕРЕНО ВЖИВУЮ: документ с картинкой по http://127.0.0.1 при выгрузке
+ *   в PDF без ключа запрашивает её, с ключом — нет;
+ * - Calc/Content/Update/Link=1 (никогда) и Writer/Content/Update/Link=0 (никогда) — не обновлять
+ *   внешние связи при загрузке (значения перечислений у Calc и Writer разные).
+ * ⚠ `--safe-mode` НЕ используем: он запускает LibreOffice с временным профилем и ОТБРАСЫВАЕТ эти
+ * настройки (проверено: с ним внешняя картинка снова запрашивается). Свежий профиль на каждый
+ * разбор и так без макросов, расширений и настроек пользователя.
+ * Сеть этим не закрыта полностью — граница сети — контейнер без выхода наружу (см. README).
+ */
+export const LO_REGISTRY = `<?xml version="1.0" encoding="UTF-8"?>
+<oor:items xmlns:oor="http://openoffice.org/2001/registry" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+<item oor:path="/org.openoffice.Office.Common/Security/Scripting"><prop oor:name="MacroSecurityLevel" oor:op="fuse"><value>3</value></prop></item>
+<item oor:path="/org.openoffice.Office.Common/Security/Scripting"><prop oor:name="DisableMacrosExecution" oor:op="fuse"><value>true</value></prop></item>
+<item oor:path="/org.openoffice.Office.Common/Security/Scripting"><prop oor:name="BlockUntrustedRefererLinks" oor:op="fuse"><value>true</value></prop></item>
+<item oor:path="/org.openoffice.Office.Calc/Content/Update"><prop oor:name="Link" oor:op="fuse"><value>1</value></prop></item>
+<item oor:path="/org.openoffice.Office.Writer/Content/Update"><prop oor:name="Link" oor:op="fuse"><value>0</value></prop></item>
+</oor:items>
+`
 
 /** Табличные форматы Office — выгружаем CSV (сетка ячеек), а не текстовым фильтром Writer. */
 const SPREADSHEET_EXT = new Set(['xls', 'xlsx', 'xlsm', 'ods', 'fods'])
@@ -158,28 +219,35 @@ export interface OfficeCsvOutput { name: string, path: string }
  * LibreOffice печатает строку на лист в порядке листов: `Writing sheet <имя> -> <путь>.csv`
  * (несколько листов) или `convert <вход> -> <путь>.csv using filter :…` (один лист).
  * Порядок держит первым лист-шапку; сортировка по имени его сломала бы («Лист10» раньше
- * «Лист2»). Чистая.
+ * «Лист2»).
+ * ⚠ Путь берётся по ПОСЛЕДНЕМУ `-> `: имя листа пишет автор документа, и `-> ` внутри имени
+ * иначе сдвинуло бы разбор. И путь принимается, ТОЛЬКО если он внутри `dir` (своего рабочего
+ * каталога): строка stdout — производная чужого документа, и без проверки подставленный путь
+ * `-> /etc/x.csv` заставил бы нас прочитать и вернуть чужой файл. Чистая.
  */
-export function parseOfficeCsvSheets(stdout: string): OfficeCsvOutput[] {
+export function parseOfficeCsvSheets(stdout: string, dir: string): OfficeCsvOutput[] {
+  const root = resolve(dir) + sep
   const out: OfficeCsvOutput[] = []
   for (const line of stdout.split('\n')) {
-    const arrow = line.indexOf('-> ')
+    const arrow = line.lastIndexOf('-> ')
     if (arrow < 0) continue
     let rest = line.slice(arrow + 3)
     const uf = rest.indexOf(' using filter')
     if (uf >= 0) rest = rest.slice(0, uf)
     rest = rest.trim()
     if (!rest.toLowerCase().endsWith('.csv')) continue
+    const full = resolve(rest)
+    if (!full.startsWith(root)) continue
     const m = line.slice(0, arrow).match(/Writing sheet (.*?)\s*$/)
-    const name = m?.[1] ?? basename(rest).replace(/\.csv$/i, '')
-    out.push({ name, path: rest })
+    const name = m?.[1] ?? basename(full).replace(/\.csv$/i, '')
+    out.push({ name, path: full })
   }
   return out
 }
 
 /** Только пути — форма, в которой функция жила в ai-price-import. Чистая. */
-export function parseOfficeCsvOutputs(stdout: string): string[] {
-  return parseOfficeCsvSheets(stdout).map(s => s.path)
+export function parseOfficeCsvOutputs(stdout: string, dir: string): string[] {
+  return parseOfficeCsvSheets(stdout, dir).map(s => s.path)
 }
 
 /** Число непустых строк CSV. Чистая. */
@@ -196,35 +264,38 @@ async function officeToText(path: string, fileName: string, signal: AbortSignal)
   const dir = await mkdtemp(join(tmpdir(), 'file-extract-office-'))
   try {
     const { filter, outExt } = officeConvertTarget(fileName)
-    // --safe-mode: LibreOffice без макросов, расширений и настроек пользователя — защита от
-    //   вредоносного документа.
-    // -env:UserInstallation: свой профиль на каждый разбор во временном каталоге → параллельные
-    //   разборы не дерутся за общий профиль. Удаляется вместе с каталогом в finally.
+    // Свой профиль на каждый разбор во временном каталоге (-env:UserInstallation): параллельные
+    // разборы не дерутся за общий профиль, а настройки безопасности (LO_REGISTRY) — свои.
     // LANG=C.UTF-8: иначе LibreOffice не сможет записать CSV листа с кириллицей в имени.
+    const profile = join(dir, 'loprofile')
+    await mkdir(join(profile, 'user'), { recursive: true })
+    await writeFile(join(profile, 'user', 'registrymodifications.xcu'), LO_REGISTRY)
+    const outDir = join(dir, 'out')
+    await mkdir(outDir)
     const stdout = await run('libreoffice', [
-      '--safe-mode', '-env:UserInstallation=file://' + join(dir, 'loprofile'),
-      '--headless', '--convert-to', filter, '--outdir', dir, path
-    ], signal, { LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' })
+      '-env:UserInstallation=file://' + profile,
+      '--headless', '--convert-to', filter, '--outdir', outDir, path
+    ], signal, { dir, env: { LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' } })
     if (outExt === 'csv') {
       // Основной путь — порядок листов из stdout. Запасной — содержимое каталога (порядок не
       // гарантирован → сортировка), только если stdout ничего не дал.
-      let outs = parseOfficeCsvSheets(stdout)
+      let outs = parseOfficeCsvSheets(stdout, outDir)
       if (!outs.length) {
-        outs = (await readdir(dir)).filter(f => f.toLowerCase().endsWith('.csv')).sort()
-          .map(f => ({ name: f.replace(/\.csv$/i, ''), path: join(dir, f) }))
+        outs = (await readdir(outDir)).filter(f => f.toLowerCase().endsWith('.csv')).sort()
+          .map(f => ({ name: f.replace(/\.csv$/i, ''), path: join(outDir, f) }))
       }
       if (outs.length) {
         if (outs.length > MAX_SHEET_CSVS) {
           throw new ExtractError('too_complex', `слишком много листов в книге (${outs.length} > ${MAX_SHEET_CSVS})`)
         }
-        const parts = await Promise.all(outs.map(async o => ({ name: o.name, csv: (await decodeText(o.path)).trim() })))
+        const parts = await Promise.all(outs.map(async o => ({ name: o.name, csv: (await readSheetCsv(o.path)).trim() })))
         const sheets: Sheet[] = parts.filter(p => p.csv !== '').map(p => ({ ...p, rows: countRows(p.csv) }))
         return { text: sheets.map(s => s.csv).join('\n'), sheets }
       }
       // CSV нет вовсе: читаем файл с базовым именем.
     }
     const base = (path.split('/').pop() ?? 'out').replace(/\.[^.]+$/, '')
-    return { text: await decodeText(join(dir, `${base}.${outExt}`)), sheets: [] }
+    return { text: await readSheetCsv(join(outDir, `${base}.${outExt}`)), sheets: [] }
   } finally {
     await rm(dir, { recursive: true, force: true }).catch(() => {})
   }
@@ -278,7 +349,7 @@ async function ocrPdf(path: string, signal: AbortSignal, maxPages: number = MAX_
     // `-l maxPages+1` — на одну страницу сверх потолка, чтобы проверка ниже увидела «слишком
     // много», не растеризуя весь документ.
     await run('pdftoppm', ['-png', '-scale-to', '3000', '-f', '1', '-l', String(maxPages + 1),
-      path, join(dir, 'p')], signal)
+      path, join(dir, 'p')], signal, { dir })
     const pages = orderPdfPageImages(await readdir(dir))
     if (!pages.length) throw new ExtractError('failed', 'pdftoppm: страницы не получены')
     if (pages.length > maxPages) {
@@ -286,7 +357,7 @@ async function ocrPdf(path: string, signal: AbortSignal, maxPages: number = MAX_
     }
     const texts: string[] = []
     for (const p of pages) {
-      texts.push(await run('tesseract', [join(dir, p), 'stdout', '-l', OCR_LANGS], signal))
+      texts.push(await run('tesseract', [join(dir, p), 'stdout', '-l', OCR_LANGS], signal, { dir }))
     }
     return { text: texts.map(t => t.trim()).filter(Boolean).join('\n'), pages: pages.length }
   } finally {
@@ -294,13 +365,29 @@ async function ocrPdf(path: string, signal: AbortSignal, maxPages: number = MAX_
   }
 }
 
+/** Потолок страниц, которые читает pdftotext: дальше — не читаем (документ в тысячи страниц
+ *  иначе держал бы процессор до таймаута). Текст сверх потолка всё равно срезал бы MAX_TEXT_CHARS. */
+export const MAX_PDF_TEXT_PAGES = 500
+
+/** Отказ до OCR, если картинка развернётся больше потолка пикселей. */
+export function checkImagePixels(bytes: Uint8Array): void {
+  const size = imageSize(bytes)
+  if (size && size.width * size.height > MAX_IMAGE_PIXELS) {
+    throw new ExtractError('too_complex', `картинка слишком большая для OCR (> ${MAX_IMAGE_PIXELS} пикселей)`)
+  }
+}
+
+async function ocrImage(path: string, signal: AbortSignal): Promise<OcrOutput> {
+  checkImagePixels(await readFile(path)) // файл уже в пределах MAX_FILE_BYTES
+  return { text: await run('tesseract', [path, 'stdout', '-l', OCR_LANGS], signal, { dir: dirname(path) }), pages: 1 }
+}
+
 export const liveExtractRunners: ExtractRunners = {
   readText: decodeText,
-  pdfToText: (path, signal) => run('pdftotext', ['-layout', '-enc', 'UTF-8', path, '-'], signal),
+  pdfToText: (path, signal) => run('pdftotext', ['-layout', '-enc', 'UTF-8', '-l', String(MAX_PDF_TEXT_PAGES), path, '-'], signal, { dir: dirname(path) }),
   officeToText,
   // OCR и для картинок, и для СКАНОВ PDF: PDF (сигнатура `%PDF-`) сначала растеризуется,
   // потому что tesseract PDF не читает. Путь выбирает проверка содержимого, а не вызывающий.
-  ocr: async (path, signal) => (await isPdfFile(path))
-    ? ocrPdf(path, signal)
-    : { text: await run('tesseract', [path, 'stdout', '-l', OCR_LANGS], signal), pages: 1 }
+  // У страниц PDF размер держит `-scale-to` pdftoppm, поэтому проверка пикселей — для картинок.
+  ocr: async (path, signal) => (await isPdfFile(path)) ? ocrPdf(path, signal) : ocrImage(path, signal)
 }

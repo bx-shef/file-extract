@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { countRows, hasPdfMagic, MAX_OCR_PDF_PAGES, MAX_SHEET_CSVS, officeConvertTarget, orderPdfPageImages, parseOfficeCsvOutputs, parseOfficeCsvSheets, subprocessEnv } from '../src/extractRunners.ts'
+import { checkImagePixels, countRows, hasPdfMagic, isolatedHome, LO_REGISTRY, MAX_PDF_TEXT_PAGES, MAX_SHEET_CSV_BYTES, MAX_OCR_PDF_PAGES, MAX_SHEET_CSVS, officeConvertTarget, orderPdfPageImages, parseOfficeCsvOutputs, parseOfficeCsvSheets, subprocessEnv } from '../src/extractRunners.ts'
 
 describe('officeConvertTarget', () => {
   it('exports spreadsheets as CSV with PINNED tab/UTF-8 options so the grid + prices survive', () => {
@@ -41,14 +41,14 @@ describe('parseOfficeCsvOutputs (workbook sheet order)', () => {
       'Writing sheet Приложение -> /tmp/x/f-Приложение.csv',
       'Writing sheet ИнформационныйЛист -> /tmp/x/f-ИнформационныйЛист.csv'
     ].join('\n')
-    expect(parseOfficeCsvOutputs(stdout)).toEqual([
+    expect(parseOfficeCsvOutputs(stdout, '/tmp/x')).toEqual([
       '/tmp/x/f-ТТН.csv', '/tmp/x/f-Приложение.csv', '/tmp/x/f-ИнформационныйЛист.csv'
     ])
   })
 
   it('parses the single-sheet "convert … -> …csv using filter :…" line shape', () => {
     const stdout = 'convert /tmp/x/f.xls -> /tmp/x/f.csv using filter : Text - txt - csv (StarCalc):9,34,76'
-    expect(parseOfficeCsvOutputs(stdout)).toEqual(['/tmp/x/f.csv'])
+    expect(parseOfficeCsvOutputs(stdout, '/tmp/x')).toEqual(['/tmp/x/f.csv'])
   })
 
   it('handles a sheet name with spaces and ignores non-csv / noise lines', () => {
@@ -57,11 +57,11 @@ describe('parseOfficeCsvOutputs (workbook sheet order)', () => {
       'Writing sheet Лист 1 -> /tmp/x/f-Лист 1.csv',
       'some unrelated -> /tmp/x/thing.txt'
     ].join('\n')
-    expect(parseOfficeCsvOutputs(stdout)).toEqual(['/tmp/x/f-Лист 1.csv'])
+    expect(parseOfficeCsvOutputs(stdout, '/tmp/x')).toEqual(['/tmp/x/f-Лист 1.csv'])
   })
 
   it('returns [] when nothing matches (caller falls back to readdir/base file)', () => {
-    expect(parseOfficeCsvOutputs('nothing here\njust logs')).toEqual([])
+    expect(parseOfficeCsvOutputs('nothing here\njust logs', '/tmp/x')).toEqual([])
   })
 })
 
@@ -117,8 +117,21 @@ describe('subprocessEnv (secret-free env for extraction binaries)', () => {
 
 describe('parseOfficeCsvSheets (имена листов)', () => {
   it('берёт имя из «Writing sheet», а для одного листа — из имени файла', () => {
-    expect(parseOfficeCsvSheets('Writing sheet Лист 1 -> /tmp/x/f-Лист 1.csv')).toEqual([{ name: 'Лист 1', path: '/tmp/x/f-Лист 1.csv' }])
-    expect(parseOfficeCsvSheets('convert /tmp/x/f.xls -> /tmp/x/f.csv using filter : x')).toEqual([{ name: 'f', path: '/tmp/x/f.csv' }])
+    expect(parseOfficeCsvSheets('Writing sheet Лист 1 -> /tmp/x/f-Лист 1.csv', '/tmp/x')).toEqual([{ name: 'Лист 1', path: '/tmp/x/f-Лист 1.csv' }])
+    expect(parseOfficeCsvSheets('convert /tmp/x/f.xls -> /tmp/x/f.csv using filter : x', '/tmp/x')).toEqual([{ name: 'f', path: '/tmp/x/f.csv' }])
+  })
+  it('путь вне своего каталога отбрасывается', () => {
+    const stdout = [
+      'Writing sheet a -> /etc/x.csv',
+      'Writing sheet b -> /tmp/x/../y/f.csv',
+      'Writing sheet c -> /tmp/xx/f.csv',
+      'Writing sheet d -> /tmp/x/ok.csv'
+    ].join('\n')
+    expect(parseOfficeCsvSheets(stdout, '/tmp/x')).toEqual([{ name: 'd', path: '/tmp/x/ok.csv' }])
+  })
+  it('«-> » внутри имени листа: путь — по последней стрелке', () => {
+    expect(parseOfficeCsvSheets('Writing sheet a -> /etc/x.csv -> /tmp/x/f-a.csv', '/tmp/x'))
+      .toEqual([{ name: 'a -> /etc/x.csv', path: '/tmp/x/f-a.csv' }])
   })
 })
 
@@ -132,5 +145,35 @@ describe('потолки перенесены без смены значений
   it('64 листа и 30 страниц скана', () => {
     expect(MAX_SHEET_CSVS).toBe(64)
     expect(MAX_OCR_PDF_PAGES).toBe(30)
+  })
+})
+
+describe('изоляция и бомбы', () => {
+  it('HOME, XDG и TMPDIR процесса — рабочий каталог', () => {
+    expect(isolatedHome('/w')).toEqual({ HOME: '/w', XDG_CONFIG_HOME: '/w/.config', XDG_CACHE_HOME: '/w/.cache', XDG_DATA_HOME: '/w/.local/share', XDG_RUNTIME_DIR: '/w', TMPDIR: '/w' })
+    const env = subprocessEnv({ HOME: '/root', PATH: '/bin' }, isolatedHome('/w'))
+    expect(env.HOME).toBe('/w')
+  })
+  it('профиль LibreOffice: макросы выключены, ссылки и внешние картинки не грузятся', () => {
+    expect(LO_REGISTRY).toContain('<prop oor:name="MacroSecurityLevel" oor:op="fuse"><value>3</value>')
+    expect(LO_REGISTRY).toContain('<prop oor:name="DisableMacrosExecution" oor:op="fuse"><value>true</value>')
+    expect(LO_REGISTRY).toContain('<prop oor:name="BlockUntrustedRefererLinks" oor:op="fuse"><value>true</value>')
+    expect(LO_REGISTRY).toMatch(/Office\.Calc\/Content\/Update"><prop oor:name="Link" oor:op="fuse"><value>1</)
+    expect(LO_REGISTRY).toMatch(/Office\.Writer\/Content\/Update"><prop oor:name="Link" oor:op="fuse"><value>0</)
+  })
+  it('картинка больше 50 Мпикс — too_complex до OCR, меньше — проходит', () => {
+    const png = (w: number, h: number) => {
+      const b = Buffer.alloc(24)
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(b, 0)
+      b.writeUInt32BE(w, 16); b.writeUInt32BE(h, 20)
+      return b
+    }
+    expect(() => checkImagePixels(png(10_000, 5_001))).toThrow(expect.objectContaining({ code: 'too_complex' }))
+    expect(() => checkImagePixels(png(10_000, 5_000))).not.toThrow()
+    expect(() => checkImagePixels(Buffer.from('не картинка'))).not.toThrow()
+  })
+  it('потолки: страницы pdftotext и размер CSV листа', () => {
+    expect(MAX_PDF_TEXT_PAGES).toBe(500)
+    expect(MAX_SHEET_CSV_BYTES).toBe(50 * 1024 * 1024)
   })
 })

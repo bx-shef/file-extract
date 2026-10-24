@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { applyTextLimit } from '../src/truncate.ts'
+import { applyTextLimit, sliceSafe } from '../src/truncate.ts'
 
 describe('applyTextLimit', () => {
   it('в пределах потолка — без изменений', () => {
@@ -22,5 +22,21 @@ describe('applyTextLimit', () => {
     ], 10)
     expect(r.sheets).toEqual([{ name: 'a', csv: '1234', rows: 1 }, { name: 'b', csv: 'ab\ncd', rows: 2 }])
     expect(r.truncated).toBe(true)
+  })
+})
+
+describe('суррогатные пары и раздельный бюджет', () => {
+  it('не режет суррогатную пару', () => {
+    expect(sliceSafe('ab😀c', 3)).toBe('ab')
+    expect(sliceSafe('ab😀c', 4)).toBe('ab😀')
+    const r = applyTextLimit('a😀', [{ name: 's', csv: 'x😀', rows: 1 }], 2)
+    expect(r.text).toBe('a')
+    expect(r.sheets[0]!.csv).toBe('x')
+    expect(r.truncated).toBe(true)
+  })
+  it('у текста и листов бюджет свой: оба ровно на потолке — ничего не обрезано', () => {
+    const sheets = [{ name: 'a', csv: '12345', rows: 1 }, { name: 'b', csv: '67890', rows: 1 }]
+    const r = applyTextLimit('x'.repeat(10), sheets, 10)
+    expect(r).toEqual({ text: 'x'.repeat(10), sheets, truncated: false })
   })
 })

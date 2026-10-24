@@ -1,8 +1,11 @@
 import type { AddressInfo } from 'node:net'
-import type { Server } from 'node:http'
+import { request, type Server } from 'node:http'
+import { mkdtemp, readdir, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { CacheStore } from '../src/cache.ts'
-import { loadConfig, type Config } from '../src/config.ts'
+import { EXTRACTOR_VERSION, loadConfig, type Config } from '../src/config.ts'
 import { ExtractError } from '../src/errors.ts'
 import type { LogEntry } from '../src/log.ts'
 import { createApp } from '../src/server.ts'
@@ -11,12 +14,14 @@ import type { ExtractRunners } from '../src/textExtract.ts'
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const KEY = 'test-key-0123456789abcdef'
 
-function memCache(): CacheStore & { map: Map<string, string> } {
+function memCache(): CacheStore & { map: Map<string, string>, ttls: number[] } {
   const map = new Map<string, string>()
+  const ttls: number[] = []
   return {
     map,
+    ttls,
     get: async k => map.get(k) ?? null,
-    set: async (k, v) => { map.set(k, v) },
+    set: async (k, v, ttl) => { map.set(k, v); ttls.push(ttl) },
     sweep: async () => 0
   }
 }
@@ -48,9 +53,9 @@ async function start(opts: { runners?: ExtractRunners, cache?: CacheStore, confi
     const headers: Record<string, string> = {}
     if (name !== null) headers['x-file-name'] = encodeURIComponent(name)
     if (auth !== null) headers.authorization = auth
-    return fetch(`${base}/extract`, { method: 'POST', headers, body })
+    return fetch(`${base}/v1/extract`, { method: 'POST', headers, body })
   }
-  return { base, extract, logs }
+  return { base, port, extract, logs }
 }
 
 describe('HTTP: /health', () => {
@@ -157,10 +162,12 @@ describe('HTTP: POST /extract', () => {
     const cache = memCache()
     const { extract } = await start({ cache })
     expect((await extract('abc', 'a.txt')).status).toBe(200)
-    for (const k of cache.map.keys()) cache.map.set(k, '{"text":')
-    const r = await extract('abc', 'a.txt')
-    expect(r.status).toBe(200)
-    expect((await r.json()).cached).toBe(false)
+    for (const bad of ['{"text":', '{"other":1}', '{"text":"x"}', 'null']) {
+      for (const k of cache.map.keys()) cache.map.set(k, bad)
+      const r = await extract('abc', 'a.txt')
+      expect(r.status).toBe(200)
+      expect(((await r.json()) as any).cached).toBe(false)
+    }
   })
   it('не создался временный каталог — место в очереди освобождается', async () => {
     const { extract } = await start({ config: { maxConcurrency: 1, queueTimeoutMs: 200 } })
@@ -201,5 +208,206 @@ describe('HTTP: POST /extract', () => {
     const rs = await Promise.all([1, 2, 3, 4, 5].map(i => extract(`файл ${i}`, 'a.txt')))
     expect(rs.every(r => r.status === 200)).toBe(true)
     expect(peak).toBe(2)
+  })
+})
+
+/** Сырой запрос: свой Content-Length/chunked и тело частями. Ответ и признак закрытия сокета. */
+function raw(port: number, opts: { headers: Record<string, string | number>, chunks: Buffer[], endBody?: boolean }) {
+  return new Promise<{ status: number, body: string, closed: boolean }>((resolve, reject) => {
+    const req = request({ host: '127.0.0.1', port, path: '/v1/extract', method: 'POST', headers: opts.headers, agent: false }, (res) => {
+      let body = ''
+      res.setEncoding('utf8')
+      res.on('data', (d: string) => { body += d })
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, body, closed: res.headers.connection === 'close' }))
+    })
+    req.on('error', reject)
+    for (const c of opts.chunks) req.write(c)
+    if (opts.endBody !== false) req.end()
+  })
+}
+
+describe('HTTP: адреса и версия', () => {
+  it('старый /extract — 404, /health не-GET — 405, ответ несёт extractorVersion', async () => {
+    const { base, extract } = await start()
+    expect((await fetch(`${base}/extract`, { method: 'POST', body: 'x' })).status).toBe(404)
+    expect((await fetch(`${base}/health`, { method: 'POST', body: 'x' })).status).toBe(405)
+    expect((await fetch(`${base}/v1/extract`)).status).toBe(405)
+    const j = await (await extract('x', 'a.txt')).json() as any
+    expect(j.extractorVersion).toBe(EXTRACTOR_VERSION)
+  })
+})
+
+describe('HTTP: журнал', () => {
+  const ALLOWED = new Set(['evt', 'kind', 'bytes', 'ms', 'queueMs', 'sha', 'cached', 'error', 'errorClass'])
+  it('в записи разбора — ровно разрешённые ключи, имени файла нет', async () => {
+    const logs: LogEntry[] = []
+    const { extract } = await start({ logs })
+    await extract('x', 'Иванов.txt')
+    expect(new Set(Object.keys(logs[0]!))).toEqual(new Set(['evt', 'kind', 'bytes', 'ms', 'queueMs', 'sha', 'cached']))
+    expect(logs[0]!.bytes).toBe(1)
+    for (const l of logs) for (const k of Object.keys(l)) expect(ALLOWED.has(k)).toBe(true)
+    expect(JSON.stringify(logs)).not.toContain('Иванов')
+  })
+  it('500 internal — класс системной ошибки без текста', async () => {
+    const logs: LogEntry[] = []
+    const { extract } = await start({ logs, runners: fakeRunners({ readText: async () => { throw Object.assign(new Error('/tmp/Иванов: нет места'), { code: 'ENOSPC' }) } }) })
+    expect((await extract('x', 'a.txt')).status).toBe(500)
+    expect(logs[0]).toMatchObject({ error: 'internal', errorClass: 'ENOSPC' })
+    expect(JSON.stringify(logs)).not.toContain('Иванов')
+  })
+})
+
+describe('HTTP: 413 и закрытие соединения', () => {
+  it('413 по Content-Length при маленьком теле, соединение закрывается', async () => {
+    const { port } = await start({ config: { maxFileBytes: 10 } })
+    const r = await raw(port, { headers: { 'x-file-name': 'a.txt', authorization: `Bearer ${KEY}`, 'content-length': 1000 }, chunks: [Buffer.from('abc')], endBody: false })
+    expect(r.status).toBe(413)
+    expect(r.closed).toBe(true)
+  })
+  it('413 по телу без Content-Length (chunked)', async () => {
+    const { port } = await start({ config: { maxFileBytes: 10 } })
+    const r = await raw(port, { headers: { 'x-file-name': 'a.txt', authorization: `Bearer ${KEY}`, 'transfer-encoding': 'chunked' }, chunks: [Buffer.alloc(8, 1), Buffer.alloc(8, 1)] })
+    expect(r.status).toBe(413)
+    expect(r.closed).toBe(true)
+  })
+  for (const variant of ['content-length', 'chunked'] as const) {
+    it(`после 413 (${variant}) сокет закрывается сразу, недочитанное тело не дочитывается`, async () => {
+      const { port } = await start({ config: { maxFileBytes: 10 } })
+      const headers: Record<string, string | number> = { 'x-file-name': 'a.txt', authorization: `Bearer ${KEY}` }
+      if (variant === 'content-length') headers['content-length'] = 100_000
+      else headers['transfer-encoding'] = 'chunked'
+      const closed = await new Promise<boolean>((resolve) => {
+        const req = request({ host: '127.0.0.1', port, path: '/v1/extract', method: 'POST', agent: false, headers })
+        req.on('error', () => {})
+        req.on('response', (res) => {
+          expect(res.statusCode).toBe(413)
+          res.resume()
+          res.socket.on('close', () => resolve(true))
+          setTimeout(() => resolve(false), 500)
+        })
+        req.write(Buffer.alloc(20, 1)) // больше потолка, но тело не закончено
+      })
+      expect(closed).toBe(true)
+    })
+  }
+  it('401 закрывает соединение', async () => {
+    const { port } = await start()
+    const r = await raw(port, { headers: { 'x-file-name': 'a.txt', 'content-length': 3 }, chunks: [Buffer.from('abc')] })
+    expect(r.status).toBe(401)
+    expect(r.closed).toBe(true)
+  })
+})
+
+describe('HTTP: кеш и временные файлы', () => {
+  it('сервер передаёт кешу срок ровно 86400', async () => {
+    const cache = memCache()
+    const { extract } = await start({ cache })
+    await extract('x', 'a.txt')
+    expect(cache.ttls).toEqual([86_400])
+  })
+  it('ключ кеша зависит от расширения и потолка текста', async () => {
+    const cache = memCache()
+    const runners = fakeRunners()
+    const { extract } = await start({ cache, runners })
+    await extract('одно', 'a.xls')
+    await extract('одно', 'a.doc')
+    expect(runners.officeToText).toHaveBeenCalledTimes(2)
+  })
+  it('после ответа (успех и ошибка) во временном каталоге нет file-extract-in-*', async () => {
+    const tmp = await mkdtemp(join(tmpdir(), 'fe-srv-'))
+    const old = process.env.TMPDIR
+    process.env.TMPDIR = tmp
+    try {
+      let n = 0
+      const runners = fakeRunners({ readText: async () => { if (n++ % 2) throw new ExtractError('failed', 'x'); return 'достаточно длинный текст' } })
+      const { extract } = await start({ runners })
+      expect((await extract('1', 'a.txt')).status).toBe(200)
+      expect((await extract('2', 'a.txt')).status).toBe(422)
+      expect((await readdir(tmp)).filter(f => f.startsWith('file-extract-in-'))).toEqual([])
+    } finally {
+      if (old === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = old
+      await rm(tmp, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('HTTP: занятость и уход клиента', () => {
+  const slow = (ms: number, hits?: { n: number }) => fakeRunners({
+    readText: (_p, signal) => new Promise((resolve, reject) => {
+      if (hits) hits.n++
+      const t = setTimeout(() => resolve('достаточно длинный текст'), ms)
+      signal.addEventListener('abort', () => { clearTimeout(t); reject(new ExtractError('timeout', 't')) })
+    })
+  })
+  it('503 busy, когда тела читают уже столько запросов, сколько разборов + очередь', async () => {
+    const { port, extract } = await start({ config: { maxConcurrency: 1, maxQueue: 0 } })
+    const slowUpload = request({ host: '127.0.0.1', port, path: '/v1/extract', method: 'POST', agent: false, headers: { 'x-file-name': 'a.txt', authorization: `Bearer ${KEY}`, 'content-length': 10 } })
+    slowUpload.on('error', () => {})
+    slowUpload.write('abc') // тело не дописано: запрос держит место чтения
+    await new Promise(r => setTimeout(r, 30))
+    const r = await extract('x', 'a.txt')
+    expect(r.status).toBe(503)
+    slowUpload.destroy()
+  })
+  it('503 busy по таймауту ожидания места', async () => {
+    const { extract } = await start({ runners: slow(200), config: { maxConcurrency: 1, queueTimeoutMs: 20 } })
+    const [a, b] = await Promise.all([extract('1', 'a.txt'), new Promise(r => setTimeout(r, 10)).then(() => extract('2', 'a.txt'))])
+    expect(a.status).toBe(200)
+    expect(b.status).toBe(503)
+    expect(((await b.json()) as any).error).toBe('busy')
+  })
+  it('503 busy сразу при полной очереди (MAX_QUEUE)', async () => {
+    const { extract } = await start({ runners: slow(150), config: { maxConcurrency: 1, maxQueue: 1, queueTimeoutMs: 5000 } })
+    const started = Date.now()
+    const rs = await Promise.all([1, 2, 3].map((i) => new Promise(r => setTimeout(r, i * 10)).then(() => extract(String(i), 'a.txt'))))
+    expect(rs.map(r => r.status).sort()).toEqual([200, 200, 503])
+    expect(Date.now() - started).toBeLessThan(1000)
+  })
+  it('клиент ушёл во время разбора — разбор прерывается, в журнале client_aborted, не 500', async () => {
+    const logs: LogEntry[] = []
+    let aborted = false
+    const runners = fakeRunners({
+      readText: (_p, signal) => new Promise((_, reject) => {
+        signal.addEventListener('abort', () => { aborted = true; reject(new ExtractError('timeout', 't')) })
+      })
+    })
+    const { port } = await start({ runners, logs, config: { extractTimeoutMs: 10_000 } })
+    await new Promise<void>((resolve) => {
+      const req = request({ host: '127.0.0.1', port, path: '/v1/extract', method: 'POST', agent: false, headers: { 'x-file-name': 'a.txt', authorization: `Bearer ${KEY}`, 'content-length': 1 } })
+      req.on('error', () => {})
+      req.end('x')
+      setTimeout(() => { req.destroy(); resolve() }, 50)
+    })
+    await vi.waitFor(() => expect(logs).toHaveLength(1), { timeout: 1000 })
+    expect(aborted).toBe(true)
+    expect(logs[0]).toMatchObject({ error: 'client_aborted' })
+  })
+  it('клиент оборвал тело — client_aborted, не 500', async () => {
+    const logs: LogEntry[] = []
+    const { port } = await start({ logs })
+    await new Promise<void>((resolve) => {
+      const req = request({ host: '127.0.0.1', port, path: '/v1/extract', method: 'POST', agent: false, headers: { 'x-file-name': 'a.txt', authorization: `Bearer ${KEY}`, 'content-length': 100 } })
+      req.on('error', () => {})
+      req.write('abc')
+      setTimeout(() => { req.destroy(); resolve() }, 50)
+    })
+    await vi.waitFor(() => expect(logs).toHaveLength(1), { timeout: 1000 })
+    expect(logs[0]).toMatchObject({ error: 'client_aborted' })
+  })
+  it('клиент ушёл, пока ждал места, — ожидающий снимается с очереди', async () => {
+    const logs: LogEntry[] = []
+    const hits = { n: 0 }
+    const { port, extract } = await start({ logs, runners: slow(150, hits), config: { maxConcurrency: 1, queueTimeoutMs: 5000 } })
+    const first = extract('1', 'a.txt')
+    await new Promise(r => setTimeout(r, 20))
+    await new Promise<void>((resolve) => {
+      const req = request({ host: '127.0.0.1', port, path: '/v1/extract', method: 'POST', agent: false, headers: { 'x-file-name': 'a.txt', authorization: `Bearer ${KEY}`, 'content-length': 1 } })
+      req.on('error', () => {})
+      req.end('2')
+      setTimeout(() => { req.destroy(); resolve() }, 30)
+    })
+    expect((await first).status).toBe(200)
+    await vi.waitFor(() => expect(logs.some(l => l.error === 'client_aborted')).toBe(true), { timeout: 1000 })
+    expect(hits.n).toBe(1) // второй до разбора не дошёл
   })
 })
