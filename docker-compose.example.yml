@@ -1,0 +1,39 @@
+# Пример подключения сервиса к своему стеку. Порт наружу НЕ публикуется: сервис доступен
+# только соседям по внутренней сети `extract` по адресу http://file-extract:3000.
+services:
+  file-extract:
+    image: ghcr.io/bx-shef/file-extract:latest
+    restart: unless-stopped
+    environment:
+      EXTRACT_API_KEY: ${EXTRACT_API_KEY:?задайте EXTRACT_API_KEY}
+      MAX_CONCURRENCY: "2"
+      # REDIS_URL: redis://file-extract-redis:6379/0
+    # Файловая система только для чтения; писать можно лишь во временный tmpfs
+    # (разбираемые файлы, профиль LibreOffice, кеш на диске — пропадает при перезапуске).
+    read_only: true
+    tmpfs:
+      - /tmp:size=1g,mode=1777
+    # Лимиты: память — главная граница против zip/XML-бомб, pids — против размножения процессов.
+    mem_limit: 2g
+    pids_limit: 256
+    cpus: 2
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - extract
+    # Пример: сервис-потребитель тоже подключается к сети `extract`.
+
+  # Необязательно: кеш в Redis вместо tmpfs. Без тома — данные не переживают перезапуск,
+  # и это нарочно: в кеше персональные данные, срок 24 часа.
+  # file-extract-redis:
+  #   image: redis:7-alpine
+  #   command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+  #   read_only: true
+  #   networks: [extract]
+
+networks:
+  extract:
+    # internal: у сети нет выхода наружу — разбираемый файл не может ничего никуда отправить.
+    internal: true
