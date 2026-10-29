@@ -6,6 +6,7 @@
 
 ## Не выпущено
 
+- Карта в `CLAUDE.md` сверена с кодом: `GET /health`, `liveExtractRunners`, `parseOfficeCsvOutputs`, `countRows`, `MIN_READABLE_CHARS`, `CACHE_TTL_SEC`, открытая задача #3.
 - Правило версий и выпуска в `CLAUDE.md`; выпуск 0.2.0 отмечен тегом `v0.2.0` и релизом GitHub (2026-10-28).
 
 ## 0.2.0 — 2026-10-24
