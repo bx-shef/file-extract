@@ -1,6 +1,6 @@
 # CLAUDE.md — file-extract
 
-> Last reviewed: 2026-10-28
+> Last reviewed: 2026-10-30
 
 Внутренний сервис разбора файлов: файл → текст и листы таблиц. Голый `node:http`, Node 22,
 TypeScript запускается через `node --experimental-strip-types` (сборки нет), тесты — vitest.
@@ -23,14 +23,16 @@ docker build -t file-extract .
 |---|---|
 | `src/formats.ts` | расширения и выбор способа разбора (`planExtraction`, `SUPPORTED_EXT`) |
 | `src/textExtract.ts` | маршрутизация разбора, `MIN_PDF_TEXT`, откат на OCR, единая точка очистки `finishText`; исполнители внедряются |
-| `src/extractRunners.ts` | живые исполнители: spawn с группой процессов (cwd/HOME/XDG — рабочий каталог), `subprocessEnv`, `isolatedHome`, профиль LibreOffice `LO_REGISTRY`, потолки `MAX_PDF_TEXT_PAGES`/`MAX_SHEET_CSV_BYTES`, `checkImagePixels`, `decodeBytes`, `officeConvertTarget`, `parseOfficeCsvSheets`, `MAX_SHEET_CSVS`, `MAX_OCR_PDF_PAGES`, `orderPdfPageImages`, `hasPdfMagic` |
+| `src/extractRunners.ts` | живые исполнители: spawn с группой процессов (cwd/HOME/XDG — рабочий каталог), `subprocessEnv`, `isolatedHome`, профиль LibreOffice `LO_REGISTRY`, потолки `MAX_PDF_TEXT_PAGES`/`MAX_SHEET_CSV_BYTES`, `checkImagePixels`, `decodeBytes`, `officeConvertTarget`, `parseOfficeCsvSheets`/`parseOfficeCsvOutputs`, `countRows`, `MAX_SHEET_CSVS`, `MAX_OCR_PDF_PAGES`, `orderPdfPageImages`, `hasPdfMagic`; набор `liveExtractRunners` |
 | `src/imageSize.ts` | размеры картинки по заголовку (PNG/JPEG/TIFF/BMP), `MAX_IMAGE_PIXELS` |
-| `src/textSanitize.ts` | `sanitizeExtractedText` |
-| `src/server.ts` | HTTP `POST /v1/extract`: авторизация, лимит размера, место для тела, кеш, очередь, таймаут, уход клиента, временный каталог, коды ошибок |
+| `src/textSanitize.ts` | `sanitizeExtractedText`, порог читаемости `MIN_READABLE_CHARS` |
+| `src/server.ts` | HTTP `POST /v1/extract` (`EXTRACT_PATH`) и `GET /health` (версия разборщика): авторизация, лимит размера, место для тела, кеш, очередь, таймаут, уход клиента, временный каталог, коды ошибок |
 | `src/cache.ts` | ключ кеша (версия, способ, расширение, потолок текста, sha), хранилища на диске (с потолком размера) и в Redis (порт `CacheStore`) |
-| `src/limiter.ts`, `src/truncate.ts`, `src/auth.ts`, `src/config.ts`, `src/log.ts`, `src/errors.ts` | очередь, потолок текста, ключ, настройки и `EXTRACTOR_VERSION`, журнал, коды ошибок |
+| `src/limiter.ts`, `src/truncate.ts`, `src/auth.ts`, `src/config.ts`, `src/log.ts`, `src/errors.ts` | очередь, потолок текста, ключ, настройки (`loadConfig`, `CACHE_TTL_SEC`, `MIN_API_KEY_LENGTH`) и `EXTRACTOR_VERSION`, журнал, коды ошибок |
 | `src/main.ts` | запуск: настройки, выбор кеша, чистка раз в час |
 | `tests/` | чистая логика + `server.test.ts` (HTTP на подставных исполнителях, без программ) + `integration.test.ts` (настоящие программы, пропускается без `soffice`) |
+
+Открытые задачи — `gh issue list` (сейчас #3: замеры на ВМ, одинаковые запросы, ключи потребителей, сканирование образа, метрики).
 
 ## Конвенции
 
