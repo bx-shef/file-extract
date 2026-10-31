@@ -10,13 +10,13 @@
 # `--network none`). `unshare -n` внутри контейнера не используем: без CAP_SYS_ADMIN (а мы
 # сбрасываем все права) и при стандартном seccomp Docker он не работает.
 
-FROM node:22-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d AS deps
+FROM node:22-slim@sha256:4b150b48b4116e2a22f2c39cc27025fbf4f153e2078fd3b14d159fdb5c7279da AS deps
 WORKDIR /app
 RUN corepack enable
 COPY package.json pnpm-lock.yaml ./
 RUN pnpm install --prod --frozen-lockfile
 
-FROM node:22-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d AS runtime
+FROM node:22-slim@sha256:4b150b48b4116e2a22f2c39cc27025fbf4f153e2078fd3b14d159fdb5c7279da AS runtime
 WORKDIR /app
 # Программы разбора (перенесено из ai-price-import): текст PDF, Office → текст/CSV, OCR с языками
 # rus+bel+kaz+eng. fonts-dejavu-core — чтобы LibreOffice было чем рисовать кириллицу.
