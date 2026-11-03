@@ -6,6 +6,8 @@
 
 ## Не выпущено
 
+## 0.2.1 — 2026-11-03
+
 - Зомби-процессы: в образе PID 1 — `tini`. LibreOffice на каждый документ Office запускает `gpgconf`/`gpg`/`gpgsm`, осиротевшие процессы доставались `node` и не подбирались (5 зомби на документ); за ~50 документов контейнер упирался в `pids_limit: 256` — падали healthcheck и разбор.
 - Карта в `CLAUDE.md` сверена с кодом: `GET /health`, `liveExtractRunners`, `parseOfficeCsvOutputs`, `countRows`, `MIN_READABLE_CHARS`, `CACHE_TTL_SEC`, открытая задача #3.
 - Правило версий и выпуска в `CLAUDE.md`; выпуск 0.2.0 отмечен тегом `v0.2.0` и релизом GitHub (2026-10-28).
