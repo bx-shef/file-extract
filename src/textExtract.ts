@@ -38,6 +38,17 @@ export interface ExtractRunners {
   officeToText: (path: string, fileName: string, signal: AbortSignal) => Promise<OfficeOutput>
   /** OCR картинки или скана PDF (tesseract rus+bel+kaz+eng). */
   ocr: (path: string, signal: AbortSignal) => Promise<OcrOutput>
+  /** HTML → PDF или DOCX через LibreOffice Writer (сборка документов: КП помощника). */
+  htmlConvert?: (path: string, to: ConvertTo, signal: AbortSignal) => Promise<Buffer>
+}
+
+export type ConvertTo = 'pdf' | 'docx'
+
+/** Цель выгрузки HTML: фильтр LibreOffice и тип ответа. Чистая. */
+export function convertTarget(to: string): { to: ConvertTo, filter: string, mime: string } | null {
+  if (to === 'pdf') return { to, filter: 'pdf:writer_pdf_Export', mime: 'application/pdf' }
+  if (to === 'docx') return { to, filter: 'docx:MS Word 2007 XML', mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }
+  return null
 }
 
 export interface ExtractResult {

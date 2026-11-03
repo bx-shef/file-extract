@@ -10,7 +10,7 @@ import { ExtractError } from './errors.ts'
 import { planExtraction } from './formats.ts'
 import { Limiter, QueueAbortedError, QueueTimeoutError } from './limiter.ts'
 import { errorClassOf, shortSha, type LogEntry, type Logger } from './log.ts'
-import { extractText, type ExtractRunners, type Sheet } from './textExtract.ts'
+import { convertTarget, extractText, type ExtractRunners, type Sheet } from './textExtract.ts'
 import { applyTextLimit } from './truncate.ts'
 
 export interface ExtractResponse {
@@ -122,6 +122,12 @@ function safeParse(raw: string): Omit<ExtractResponse, 'cached'> | null {
 /** Адрес разбора. Версия в пути — чтобы менять ответ, не ломая старых клиентов. */
 export const EXTRACT_PATH = '/v1/extract'
 
+/** Адрес сборки документа: тело — HTML (UTF-8), `?to=pdf|docx`, ответ — байты файла. */
+export const CONVERT_PATH = '/v1/convert'
+
+/** Потолок HTML на сборку: КП — десятки КБ, картинки встраиваются data:-адресами. */
+export const MAX_CONVERT_HTML_BYTES = 5 * 1024 * 1024
+
 /** Статусы, после которых тело запроса могло остаться недочитанным: соединение закрываем. */
 const CLOSE_STATUSES = new Set([401, 413, 503])
 
@@ -215,8 +221,102 @@ export function createApp(deps: AppDeps): Server {
     }
   }
 
+  /** Сборка: те же ключ, очередь, таймаут и потолок одновременных тел, что у разбора. Без кеша. */
+  async function handleConvert(req: IncomingMessage, query: string, signal: AbortSignal, ctx: Ctx): Promise<{ body: Buffer, mime: string }> {
+    if (!checkBearer(req.headers.authorization, config.apiKey)) {
+      throw new HttpError(401, 'unauthorized', 'неверный или отсутствующий ключ')
+    }
+    const target = convertTarget(new URLSearchParams(query).get('to') ?? '')
+    if (!target) throw new HttpError(400, 'bad_request', 'параметр to: pdf или docx')
+    if (!runners.htmlConvert) throw new HttpError(501, 'not_implemented', 'сборка документов не подключена')
+    const max = Math.min(config.maxFileBytes, MAX_CONVERT_HTML_BYTES)
+    const declared = Number(req.headers['content-length'] ?? NaN)
+    if (Number.isFinite(declared) && declared > max) throw new HttpError(413, 'too_large', `HTML больше ${max} байт`)
+    if (inflight >= maxInflight) throw new HttpError(503, 'busy', 'сервис занят, повторите позже')
+    inflight++
+    try {
+      const body = await readBody(req, max)
+      ctx.bytes = body.length
+      if (body.length === 0) throw new HttpError(400, 'bad_request', 'пустое тело запроса')
+      const waitStart = now()
+      let release: () => void
+      try {
+        release = await limiter.acquire(signal)
+      } catch (e) {
+        if (e instanceof QueueAbortedError) throw clientAborted()
+        if (e instanceof QueueTimeoutError) throw new HttpError(503, 'busy', 'сервис занят, повторите позже')
+        throw e
+      } finally {
+        ctx.queueMs = now() - waitStart
+      }
+      let dir: string | undefined
+      const ac = new AbortController()
+      const onOuter = (): void => ac.abort(signal.reason)
+      signal.addEventListener('abort', onOuter, { once: true })
+      const timer = setTimeout(() => ac.abort(new ExtractError('timeout', 'сборка не уложилась во время')), config.extractTimeoutMs)
+      try {
+        if (signal.aborted) throw clientAborted()
+        dir = await mkdtemp(join(tmpdir(), 'file-extract-html-'))
+        const input = join(dir, 'document.html')
+        await writeFile(input, body, { mode: 0o600 })
+        const out = await Promise.race([
+          runners.htmlConvert(input, target.to, ac.signal),
+          new Promise<never>((_, reject) => {
+            ac.signal.addEventListener('abort', () => reject(ac.signal.reason), { once: true })
+          })
+        ])
+        return { body: out, mime: target.mime }
+      } finally {
+        clearTimeout(timer)
+        signal.removeEventListener('abort', onOuter)
+        ac.abort()
+        release()
+        if (dir) await rm(dir, { recursive: true, force: true }).catch(() => {})
+      }
+    } finally {
+      inflight--
+    }
+  }
+
   const server = createServer((req, res) => {
-    const url = (req.url ?? '/').split('?')[0]
+    function replyError(e: unknown, evt: LogEntry['evt'], kind: string, started: number, ctx: Ctx): void {
+      let status = 500
+      let code = 'internal'
+      let message = 'внутренняя ошибка'
+      if (e instanceof HttpError) {
+        status = e.status; code = e.code; message = e.message
+      } else if (e instanceof ExtractError) {
+        const m = EXTRACT_STATUS[e.code]
+        status = m[0]; code = m[1]; message = e.message
+      }
+      log({ evt, kind, ms: now() - started, ...(ctx.queueMs !== undefined ? { queueMs: ctx.queueMs } : {}), ...(ctx.bytes !== undefined ? { bytes: ctx.bytes } : {}), error: code, ...(status === 500 ? { errorClass: errorClassOf(e) } : {}) })
+      if (code === 'client_aborted' || res.destroyed) {
+        req.destroy()
+        return
+      }
+      // Тело могло остаться недочитанным: закрываем соединение после ответа, а не дочитываем
+      // его впустую (иначе клиент держал бы сокет, заливая до 20 МБ в никуда).
+      if (CLOSE_STATUSES.has(status)) {
+        res.setHeader('connection', 'close')
+        res.on('finish', () => { if (!req.complete) req.destroy() })
+      }
+      sendJson(res, status, { error: code, message })
+    }
+    const [url, query = ''] = (req.url ?? '/').split('?', 2)
+    if (url === CONVERT_PATH) {
+      if (req.method !== 'POST') { sendJson(res, 405, { error: 'method_not_allowed', message: 'нужен POST' }); return }
+      const started = now()
+      const ctx: Ctx = {}
+      const gone = new AbortController()
+      res.on('close', () => { if (!res.writableFinished) gone.abort(clientAborted()) })
+      handleConvert(req, query, gone.signal, ctx).then((out) => {
+        log({ evt: 'convert', kind: out.mime === 'application/pdf' ? 'pdf' : 'docx', ms: now() - started, bytes: ctx.bytes })
+        if (res.destroyed) return
+        res.writeHead(200, { 'content-type': out.mime, 'content-length': out.body.length, 'cache-control': 'no-store' })
+        res.end(out.body)
+      }).catch((e: unknown) => replyError(e, 'convert', '', started, ctx))
+      return
+    }
     if (url === '/health') {
       if (req.method !== 'GET') { sendJson(res, 405, { error: 'method_not_allowed', message: 'нужен GET' }); return }
       sendJson(res, 200, { ok: true, version: EXTRACTOR_VERSION })
@@ -244,29 +344,7 @@ export function createApp(deps: AppDeps): Server {
     handleExtract(req, gone.signal, ctx).then((out) => {
       log({ evt: 'extract', kind: out.kind, ...timing(), sha: shortSha(out.sha256), cached: out.cached })
       if (!res.destroyed) sendJson(res, 200, out)
-    }).catch((e: unknown) => {
-      let status = 500
-      let code = 'internal'
-      let message = 'внутренняя ошибка'
-      if (e instanceof HttpError) {
-        status = e.status; code = e.code; message = e.message
-      } else if (e instanceof ExtractError) {
-        const m = EXTRACT_STATUS[e.code]
-        status = m[0]; code = m[1]; message = e.message
-      }
-      log({ evt: 'extract', kind, ...timing(), error: code, ...(status === 500 ? { errorClass: errorClassOf(e) } : {}) })
-      if (code === 'client_aborted' || res.destroyed) {
-        req.destroy()
-        return
-      }
-      // Тело могло остаться недочитанным: закрываем соединение после ответа, а не дочитываем
-      // его впустую (иначе клиент держал бы сокет, заливая до 20 МБ в никуда).
-      if (CLOSE_STATUSES.has(status)) {
-        res.setHeader('connection', 'close')
-        res.on('finish', () => { if (!req.complete) req.destroy() })
-      }
-      sendJson(res, status, { error: code, message })
-    })
+    }).catch((e: unknown) => replyError(e, 'extract', kind, started, ctx))
   })
   // Потолок соединений: разборы + очередь + запас на /health и отказы.
   server.maxConnections = maxInflight + 16

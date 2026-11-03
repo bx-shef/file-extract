@@ -32,6 +32,7 @@ function fakeRunners(over: Partial<ExtractRunners> = {}): ExtractRunners {
     pdfToText: vi.fn(async () => 'текст PDF достаточной длины, чтобы не уходить в OCR'),
     officeToText: vi.fn(async () => ({ text: 'a\tb\nc\td', sheets: [{ name: 'Лист1', csv: 'a\tb\nc\td', rows: 2 }] })),
     ocr: vi.fn(async () => ({ text: 'распознанный текст скана', pages: 3 })),
+    htmlConvert: vi.fn(async (_p: string, to: string) => Buffer.from(to === 'pdf' ? '%PDF-1.7 x' : 'PK x')),
     ...over
   }
 }
@@ -409,5 +410,59 @@ describe('HTTP: занятость и уход клиента', () => {
     expect((await first).status).toBe(200)
     await vi.waitFor(() => expect(logs.some(l => l.error === 'client_aborted')).toBe(true), { timeout: 1000 })
     expect(hits.n).toBe(1) // второй до разбора не дошёл
+  })
+})
+
+describe('HTTP: POST /v1/convert', () => {
+  const conv = (base: string, to: string, body: string, auth: string | null = `Bearer ${KEY}`) =>
+    fetch(`${base}/v1/convert?to=${to}`, { method: 'POST', headers: auth ? { authorization: auth } : {}, body })
+
+  it('PDF: байты файла и тип application/pdf, HTML доходит до исполнителя', async () => {
+    const runners = fakeRunners()
+    const { base, logs } = await start({ runners })
+    const r = await conv(base, 'pdf', '<p>КП</p>')
+    expect(r.status).toBe(200)
+    expect(r.headers.get('content-type')).toBe('application/pdf')
+    expect(Buffer.from(await r.arrayBuffer()).toString('latin1').startsWith('%PDF-')).toBe(true)
+    expect(runners.htmlConvert).toHaveBeenCalledWith(expect.stringMatching(/document\.html$/), 'pdf', expect.anything())
+    expect(logs.find(l => l.evt === 'convert')).toMatchObject({ kind: 'pdf', bytes: Buffer.byteLength('<p>КП</p>') })
+  })
+
+  it('DOCX: тип Word', async () => {
+    const { base } = await start()
+    const r = await conv(base, 'docx', '<p>КП</p>')
+    expect(r.status).toBe(200)
+    expect(r.headers.get('content-type')).toContain('wordprocessingml')
+  })
+
+  it('без ключа — 401, исполнитель не зовётся', async () => {
+    const runners = fakeRunners()
+    const { base } = await start({ runners })
+    expect((await conv(base, 'pdf', '<p>x</p>', null)).status).toBe(401)
+    expect(runners.htmlConvert).not.toHaveBeenCalled()
+  })
+
+  it('неизвестный формат и пустое тело — 400', async () => {
+    const { base } = await start()
+    expect((await conv(base, 'exe', '<p>x</p>')).status).toBe(400)
+    expect((await conv(base, 'pdf', '')).status).toBe(400)
+  })
+
+  it('HTML больше 5 МБ — 413', async () => {
+    const { base } = await start()
+    const r = await conv(base, 'pdf', 'a'.repeat(5 * 1024 * 1024 + 1))
+    expect(r.status).toBe(413)
+  })
+
+  it('сбой LibreOffice — 422 без подробностей пути', async () => {
+    const { base } = await start({ runners: fakeRunners({ htmlConvert: async () => { throw new ExtractError('failed', 'libreoffice: документ не получен') } }) })
+    const r = await conv(base, 'pdf', '<p>x</p>')
+    expect(r.status).toBe(422)
+    expect(await r.json()).toMatchObject({ error: 'extract_failed' })
+  })
+
+  it('GET — 405', async () => {
+    const { base } = await start()
+    expect((await fetch(`${base}/v1/convert?to=pdf`)).status).toBe(405)
   })
 })

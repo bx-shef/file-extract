@@ -66,6 +66,19 @@ describe.skipIf(!ready)('настоящие программы разбора', 
     expect(r.sheets[1]!.csv).toContain('Шуруп')
     expect(sofficeLeft()).toBe(0)
   }, 120_000)
+  it('HTML → PDF и DOCX: кириллица и таблица доходят до файла', async () => {
+    const html = join(dir, 'kp.html')
+    await writeFile(html, '<!doctype html><html><head><meta charset="utf-8"></head><body><h1>Коммерческое предложение</h1><table><tr><td>Гвоздь</td><td>12,50</td></tr></table></body></html>')
+    const pdf = await liveExtractRunners.htmlConvert!(html, 'pdf', signal)
+    expect(pdf.subarray(0, 5).toString('latin1')).toBe('%PDF-')
+    await writeFile(join(dir, 'kp-out.pdf'), pdf)
+    expect((await extractText(join(dir, 'kp-out.pdf'), 'kp.pdf', liveExtractRunners, signal)).text).toContain('Гвоздь')
+    const docx = await liveExtractRunners.htmlConvert!(html, 'docx', signal)
+    expect(docx.subarray(0, 2).toString('latin1')).toBe('PK')
+    await writeFile(join(dir, 'kp-out.docx'), docx)
+    expect((await extractText(join(dir, 'kp-out.docx'), 'kp.docx', liveExtractRunners, signal)).text).toContain('Коммерческое предложение')
+  }, 120_000)
+
   it('pdf с текстом', async () => {
     expect((await readFile(join(dir, 'src.pdf'))).subarray(0, 5).toString()).toBe('%PDF-')
     const r = await extractText(join(dir, 'src.pdf'), 'счёт.pdf', liveExtractRunners, signal)

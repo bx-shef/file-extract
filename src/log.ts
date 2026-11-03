@@ -4,7 +4,7 @@
  * тип поля закрыт, поэтому положить их «заодно» не даст компилятор.
  */
 export interface LogEntry {
-  evt: 'extract' | 'start' | 'cache_sweep' | 'cache_sweep_failed' | 'error'
+  evt: 'extract' | 'convert' | 'start' | 'cache_sweep' | 'cache_sweep_failed' | 'error'
   kind?: string
   bytes?: number
   /** Время от приёма запроса до ответа. */
