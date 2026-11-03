@@ -108,10 +108,10 @@ describe('convertTarget', () => {
 
 describe('unsafeHtml', () => {
   it('обычное КП: таблица, стили, картинка data: и ссылка https — можно', () => {
-    expect(unsafeHtml('<html><head><meta charset="utf-8"><style>td{border:1px solid}</style></head><body><img src="data:image/png;base64,AAA"><a href="https://ex.by/x">сайт</a><table><tr><td>1/2</td></tr></table></body></html>')).toBeNull()
+    expect(unsafeHtml('<html><head><meta charset="utf-8"><style>td{border:1px solid}</style></head><body><img src="data:image/png;base64,AAA"><a href="https://ex.by/x">сайт</a><table><tr><td>1/2</td></tr></table><p>File: прайс; macro: нет; Profile: кратко</p></body></html>')).toBeNull()
   })
   it('локальные файлы, вложенные документы, скрипты, команды LibreOffice — нельзя', () => {
-    for (const bad of ['<img src="file:///etc/passwd">', '<iframe src="x">', '<object data="a">', '<link rel=stylesheet href="s.css">', '<script>x</script>', '<style>@import "a.css"</style>', '<a href="vnd.sun.star.script:x">', '<a href="macro:x">', '<img src="/etc/hosts">', '<img src=../../app/src/config.ts>', '<meta http-equiv="refresh" content="0">', '<base href="/">']) {
+    for (const bad of ['<img src="file:///etc/passwd">', '<iframe src="x">', '<object data="a">', '<link rel=stylesheet href="s.css">', '<script>x</script>', '<style>@import "a.css"</style>', '<a href="vnd.sun.star.script:x">', '<a href="macro:x">', '<div style="background:url(file:///etc/x)">', '<img src="/etc/hosts">', '<img src=../../app/src/config.ts>', '<meta http-equiv="refresh" content="0">', '<base href="/">']) {
       expect(unsafeHtml(bad), bad).not.toBeNull()
     }
   })

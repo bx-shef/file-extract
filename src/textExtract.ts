@@ -52,11 +52,11 @@ export type ConvertTo = 'pdf' | 'docx'
  */
 export function unsafeHtml(html: string): string | null {
   const rules: [RegExp, string][] = [
-    [/file:/i, 'ссылка на файл (file:)'],
+    [/(=|url\()\s*["']?\s*file:/i, 'ссылка на файл (file:)'],
     [/<\s*(iframe|object|embed|frame|frameset|applet|link|base|meta\s+http-equiv)/i, 'вложенный документ или внешний ресурс'],
     [/<\s*script/i, 'скрипт'],
     [/@import/i, 'внешний стиль (@import)'],
-    [/vnd\.sun\.star|macro:|\.uno:/i, 'команда LibreOffice'],
+    [/(=|url\()\s*["']?\s*(vnd\.sun\.star|macro:|\.uno:)/i, 'команда LibreOffice'],
     [/(src|href|background)\s*=\s*["']?\s*(?!data:|https?:|#|mailto:)[^"'\s>]*[\/]/i, 'путь к файлу в src/href'],
   ]
   for (const [re, why] of rules) if (re.test(html)) return why
