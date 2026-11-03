@@ -65,6 +65,6 @@ docker build -t file-extract .
 - Образ по-прежнему `sha-<коммит>`: toolsai-mcp закрепляет его в `FILE_EXTRACT_TAG`. Вручную образы не пушить.
 - Сторонние actions в CI — запинены на SHA.
 
-## Playwright
+## Разовые контейнеры проверок
 
-- Образ Playwright — только через `../stand/tools/pw-run.sh <проект> <задача> [опции docker run] -- <команда>` (bx-shef/toolsai-stand, клон рядом). Прямой `docker run mcr.microsoft.com/playwright…` не использовать: обёртка задаёт лимиты памяти и CPU, shm 1 ГБ, --init, отключает дампы WSL, даёт имя, метку project и таймаут (PW_TIMEOUT). Не больше двух прогонов одновременно. Пример: `PW_TIMEOUT=900 ../stand/tools/pw-run.sh <репо> check -v D:/tmp/chk:/w -w /w -- bash -c './build.sh --check'`.
+- Любые разовые `docker run` для проверок (Playwright, node, php…) — только через `../stand/tools/pw-run.sh <проект> <задача> [опции docker run] -- <команда>` (bx-shef/toolsai-stand, клон рядом). Образ Playwright — по умолчанию, другой — `PW_IMAGE=node:22`. Прямой `docker run` для проверок не использовать: обёртка задаёт лимиты памяти и CPU, shm 1 ГБ, --init, отключает дампы WSL, даёт имя, метку project и таймаут (PW_TIMEOUT). Не больше двух прогонов одновременно. Пример: `PW_TIMEOUT=900 ../stand/tools/pw-run.sh <репо> check -v D:/tmp/chk:/w -w /w -- bash -c './build.sh --check'`.
