@@ -470,6 +470,16 @@ describe('HTTP: POST /v1/convert', () => {
     expect(runners.htmlConvert).not.toHaveBeenCalled()
   })
 
+  it('не UTF-8 и UTF-16 с BOM — 400 unsafe_html', async () => {
+    const runners = fakeRunners()
+    const { base } = await start({ runners })
+    for (const body of [Buffer.from([0x3c, 0x70, 0x3e, 0xc0, 0xaf]), Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('<p>КП</p>')])]) {
+      const r = await fetch(`${base}/v1/convert?to=pdf`, { method: 'POST', headers: { authorization: `Bearer ${KEY}` }, body })
+      expect(r.status).toBe(400)
+    }
+    expect(runners.htmlConvert).not.toHaveBeenCalled()
+  })
+
   it('GET — 405', async () => {
     const { base } = await start()
     expect((await fetch(`${base}/v1/convert?to=pdf`)).status).toBe(405)

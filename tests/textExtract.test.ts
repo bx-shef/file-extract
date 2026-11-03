@@ -111,7 +111,7 @@ describe('unsafeHtml', () => {
     expect(unsafeHtml('<html><head><meta charset="utf-8"><style>td{border:1px solid}</style></head><body><img src="data:image/png;base64,AAA"><a href="https://ex.by/x">сайт</a><table><tr><td>1/2</td></tr></table><p>File: прайс; macro: нет; Profile: кратко</p></body></html>')).toBeNull()
   })
   it('локальные файлы, вложенные документы, скрипты, команды LibreOffice — нельзя', () => {
-    for (const bad of ['<img src="file:///etc/passwd">', '<iframe src="x">', '<object data="a">', '<link rel=stylesheet href="s.css">', '<script>x</script>', '<style>@import "a.css"</style>', '<a href="vnd.sun.star.script:x">', '<a href="macro:x">', '<div style="background:url(file:///etc/x)">', '<img src="/etc/hosts">', '<img src=../../app/src/config.ts>', '<meta http-equiv="refresh" content="0">', '<base href="/">']) {
+    for (const bad of ['<img src="file:///etc/passwd">', '<iframe src="x">', '<object data="a">', '<link rel=stylesheet href="s.css">', '<script>x</script>', '<style>@import "a.css"</style>', '<a href="vnd.sun.star.script:x">', '<a href="macro:x">', '<div style="background:url(file:///etc/x)">', '<img src="/etc/hosts">', '<img src=../../app/src/config.ts>', '<meta http-equiv="refresh" content="0">', '<base href="/">', '<img src="&#x66;ile:&#x2F;&#x2F;&#x2F;etc&#x2F;passwd">', '<div style="background:url(\\66 ile:///etc/x)">', '<style>@\\69mport "a.css"</style>', '<meta charset="utf-7">', '<svg><image href="x"/></svg>', '<a href="http://169.254.169.254/">', '<img src="https://ex.by/a.png">', '<img src="C:\\x.png">', '<td background="x.png">']) {
       expect(unsafeHtml(bad), bad).not.toBeNull()
     }
   })

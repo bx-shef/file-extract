@@ -238,7 +238,11 @@ export function createApp(deps: AppDeps): Server {
       const body = await readBody(req, max)
       ctx.bytes = body.length
       if (body.length === 0) throw new HttpError(400, 'bad_request', 'пустое тело запроса')
-      const unsafe = unsafeHtml(body.toString('utf8'))
+      // Только UTF-8 без BOM: иначе LibreOffice прочтёт байты в другой кодировке, чем проверка
+      let text: string
+      try { text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(body) } catch { throw new HttpError(400, 'unsafe_html', 'HTML не собирается: нужна кодировка UTF-8') }
+      if (text.charCodeAt(0) === 0xfeff) throw new HttpError(400, 'unsafe_html', 'HTML не собирается: нужна кодировка UTF-8 без BOM')
+      const unsafe = unsafeHtml(text)
       if (unsafe) throw new HttpError(400, 'unsafe_html', `HTML не собирается: ${unsafe}`)
       const waitStart = now()
       let release: () => void
