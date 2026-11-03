@@ -25,6 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libreoffice-calc libreoffice-writer \
       tesseract-ocr tesseract-ocr-eng tesseract-ocr-rus tesseract-ocr-bel tesseract-ocr-kaz \
       fonts-dejavu-core \
+      tini \
     && rm -rf /var/lib/apt/lists/*
 # Сборка падает СРАЗУ, если программа разбора сломана: переименованный пакет или неполная
 # установка иначе прошли бы `docker build` и всплыли бы только на первом файле.
@@ -38,6 +39,7 @@ RUN set -eu; \
     pdftoppm -v 2>&1 | grep -qiE 'pdftoppm version [0-9]'; \
     HOME=/tmp timeout 60 libreoffice --version 2>&1 | grep -qiE 'libreoffice [0-9]'; \
     tesseract --version 2>&1 | grep -qiE 'tesseract [0-9]'; \
+    tini --version | grep -qiE 'tini version [0-9]'; \
     langs="$(tesseract --list-langs 2>&1)"; \
     for l in rus bel kaz eng; do echo "$langs" | grep -qx "$l" || { echo "missing tesseract lang: $l" >&2; exit 1; }; done; \
     rm -rf /tmp/.config /tmp/*
@@ -58,4 +60,8 @@ COPY src ./src
 USER 1000:1000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD ["node", "-e", "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+# tini — PID 1: LibreOffice на каждый документ запускает gpgconf/gpg/gpgsm, они осиротевают и
+# достаются PID 1. node их не подбирает — копились зомби (5 на документ), за ~50 документов
+# упирались в pids_limit 256: падал healthcheck и разбор (bx-shef/file-extract, 03.11).
+ENTRYPOINT ["/usr/bin/tini", "-s", "--"]
 CMD ["node", "--experimental-strip-types", "src/main.ts"]
