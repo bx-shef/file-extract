@@ -93,6 +93,15 @@ curl -s -X POST http://file-extract:3000/v1/extract \
 
 `200 {"ok": true, "version": "<версия разборщика>"}`, без ключа.
 
+### POST /v1/convert?to=pdf|docx — сборка документа
+
+Тело — HTML (UTF-8, стили внутри, без внешних картинок: сети у контейнера нет) до 5 МБ, заголовок
+`Authorization: Bearer <EXTRACT_API_KEY>`. Ответ 200 — байты файла (`application/pdf` или Word
+`.docx`). Ошибки — как у разбора: 400 (нет `to`, пустое тело), 401, 413, 422 `extract_failed`
+(LibreOffice не собрал), 503 `busy`, 504 `timeout`. Очередь, таймаут и потолок одновременных тел —
+общие с разбором; кеша нет. Сборка — LibreOffice Writer (`--infilter=HTML (StarWriter)`), профиль —
+тот же, что у разбора. Клиент — shef.cowork (`disk_doc_build`, КП помощника).
+
 ## Настройки (env)
 
 | Переменная | По умолчанию | Что значит |

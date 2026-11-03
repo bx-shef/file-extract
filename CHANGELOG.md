@@ -6,6 +6,8 @@
 
 ## Не выпущено
 
+- **Сборка документа: HTML → PDF/DOCX** (bx-shef/toolsai-assistant#385, PR #20): `POST /v1/convert?to=pdf|docx`, тело — HTML (UTF-8) до 5 МБ, ответ — байты файла (`application/pdf` / Word). LibreOffice Writer (`--infilter=HTML (StarWriter)`) со своим профилем и настройками безопасности разбора; тот же ключ, очередь, потолок одновременных тел и таймаут, без кеша. Нужен shef.cowork с `disk_doc_build`. Образ пересобрать; новых пакетов нет (`libreoffice-writer` уже в образе).
+
 ## 0.2.1 — 2026-11-03
 
 - Зомби-процессы: в образе PID 1 — `tini`. LibreOffice на каждый документ Office запускает `gpgconf`/`gpg`/`gpgsm`, осиротевшие процессы доставались `node` и не подбирались (5 зомби на документ); за ~50 документов контейнер упирался в `pids_limit: 256` — падали healthcheck и разбор.
