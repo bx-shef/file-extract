@@ -461,6 +461,15 @@ describe('HTTP: POST /v1/convert', () => {
     expect(await r.json()).toMatchObject({ error: 'extract_failed' })
   })
 
+  it('HTML с file: — 400 unsafe_html, LibreOffice не зовётся', async () => {
+    const runners = fakeRunners()
+    const { base } = await start({ runners })
+    const r = await conv(base, 'pdf', '<img src="file:///etc/passwd">')
+    expect(r.status).toBe(400)
+    expect(await r.json()).toMatchObject({ error: 'unsafe_html' })
+    expect(runners.htmlConvert).not.toHaveBeenCalled()
+  })
+
   it('GET — 405', async () => {
     const { base } = await start()
     expect((await fetch(`${base}/v1/convert?to=pdf`)).status).toBe(405)

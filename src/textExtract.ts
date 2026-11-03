@@ -44,6 +44,25 @@ export interface ExtractRunners {
 
 export type ConvertTo = 'pdf' | 'docx'
 
+/**
+ * HTML, который LibreOffice не должен открывать: ссылки на локальные файлы (`file:`, путь `/…` у
+ * src), вложенные документы (iframe/object/embed/frame), внешние стили (`<link>`, `@import`),
+ * схемы LibreOffice (`vnd.sun.star`, `macro:`), скрипты. Сборке нужен только текст, таблицы, стили
+ * внутри `<style>` и картинки `data:`. Чистая.
+ */
+export function unsafeHtml(html: string): string | null {
+  const rules: [RegExp, string][] = [
+    [/file:/i, 'ссылка на файл (file:)'],
+    [/<\s*(iframe|object|embed|frame|frameset|applet|link|base|meta\s+http-equiv)/i, 'вложенный документ или внешний ресурс'],
+    [/<\s*script/i, 'скрипт'],
+    [/@import/i, 'внешний стиль (@import)'],
+    [/vnd\.sun\.star|macro:|\.uno:/i, 'команда LibreOffice'],
+    [/(src|href|background)\s*=\s*["']?\s*(?!data:|https?:|#|mailto:)[^"'\s>]*[\/]/i, 'путь к файлу в src/href'],
+  ]
+  for (const [re, why] of rules) if (re.test(html)) return why
+  return null
+}
+
 /** Цель выгрузки HTML: фильтр LibreOffice и тип ответа. Чистая. */
 export function convertTarget(to: string): { to: ConvertTo, filter: string, mime: string } | null {
   if (to === 'pdf') return { to, filter: 'pdf:writer_pdf_Export', mime: 'application/pdf' }

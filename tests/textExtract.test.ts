@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { ExtractError } from '../src/errors.ts'
 import { planExtraction, SUPPORTED_EXT } from '../src/formats.ts'
 import { extractText, MIN_PDF_TEXT, type ExtractRunners } from '../src/textExtract.ts'
-import { convertTarget } from '../src/textExtract.ts'
+import { convertTarget, unsafeHtml } from '../src/textExtract.ts'
 
 describe('planExtraction', () => {
   it('выбирает способ по расширению без учёта регистра', () => {
@@ -103,5 +103,16 @@ describe('convertTarget', () => {
     expect(convertTarget('docx')?.mime).toBe('application/vnd.openxmlformats-officedocument.wordprocessingml.document')
     expect(convertTarget('html')).toBeNull()
     expect(convertTarget('')).toBeNull()
+  })
+})
+
+describe('unsafeHtml', () => {
+  it('обычное КП: таблица, стили, картинка data: и ссылка https — можно', () => {
+    expect(unsafeHtml('<html><head><meta charset="utf-8"><style>td{border:1px solid}</style></head><body><img src="data:image/png;base64,AAA"><a href="https://ex.by/x">сайт</a><table><tr><td>1/2</td></tr></table></body></html>')).toBeNull()
+  })
+  it('локальные файлы, вложенные документы, скрипты, команды LibreOffice — нельзя', () => {
+    for (const bad of ['<img src="file:///etc/passwd">', '<iframe src="x">', '<object data="a">', '<link rel=stylesheet href="s.css">', '<script>x</script>', '<style>@import "a.css"</style>', '<a href="vnd.sun.star.script:x">', '<a href="macro:x">', '<img src="/etc/hosts">', '<img src=../../app/src/config.ts>', '<meta http-equiv="refresh" content="0">', '<base href="/">']) {
+      expect(unsafeHtml(bad), bad).not.toBeNull()
+    }
   })
 })

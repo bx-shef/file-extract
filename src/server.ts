@@ -10,7 +10,7 @@ import { ExtractError } from './errors.ts'
 import { planExtraction } from './formats.ts'
 import { Limiter, QueueAbortedError, QueueTimeoutError } from './limiter.ts'
 import { errorClassOf, shortSha, type LogEntry, type Logger } from './log.ts'
-import { convertTarget, extractText, type ExtractRunners, type Sheet } from './textExtract.ts'
+import { convertTarget, extractText, unsafeHtml, type ExtractRunners, type Sheet } from './textExtract.ts'
 import { applyTextLimit } from './truncate.ts'
 
 export interface ExtractResponse {
@@ -238,6 +238,8 @@ export function createApp(deps: AppDeps): Server {
       const body = await readBody(req, max)
       ctx.bytes = body.length
       if (body.length === 0) throw new HttpError(400, 'bad_request', 'пустое тело запроса')
+      const unsafe = unsafeHtml(body.toString('utf8'))
+      if (unsafe) throw new HttpError(400, 'unsafe_html', `HTML не собирается: ${unsafe}`)
       const waitStart = now()
       let release: () => void
       try {
