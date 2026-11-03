@@ -1,12 +1,12 @@
 # file-extract — сервис разбора файлов
 
-> Last reviewed: 2026-10-24
+> Last reviewed: 2026-11-04
 
 Внутренний сервис: получает файл и возвращает его текст, а для таблиц — ещё и каждый лист
 отдельным CSV. Им пользуются другие сервисы линейки (toolsai-mcp, позже импорт прайсов и
 клиент-банк), чтобы разбор жил в одном месте, а не копиями в каждом продукте.
 
-Разбор перенесён из `ai-price-import` без смены смысла.
+Логика разбора — та же, что в `ai-price-import`. Для разработчиков соседних сервисов — [docs/dev/README.md](docs/dev/README.md).
 
 ## Что умеет
 
@@ -197,3 +197,6 @@ docker run --rm --read-only --tmpfs /tmp -e EXTRACT_API_KEY=$(openssl rand -hex 
 Пример для compose — `docker-compose.example.yml`. Образ публикуется в
 `ghcr.io/bx-shef/file-extract` на каждый push в `main` с тегом sha коммита (и `latest`); в
 compose указывайте тег sha.
+
+В образе PID 1 — `tini`: он подбирает осиротевшие процессы, которые LibreOffice запускает на
+каждый документ (`gpgconf`, `gpg`, `gpgsm`); без него контейнер упирается в `pids_limit`.
