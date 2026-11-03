@@ -55,7 +55,7 @@ docker build -t file-extract .
 
 У сервиса есть версия (решение владельца 2026-10-28), semver: `version` в `package.json` = верхний
 заголовок `## X.Y.Z — ГГГГ-ММ-ДД` в `CHANGELOG.md`; выпуск — тег `vX.Y.Z` и релиз GitHub. Выпущено:
-**0.2.0** (тег `v0.2.0`). `GET /health` отдаёт `version` = `EXTRACTOR_VERSION` (`0.2.0-1`) —
+**0.2.1** (тег `v0.2.1`). `GET /health` отдаёт `version` = `EXTRACTOR_VERSION` (`0.2.0-1`) —
 версия разборщика: версия продукта + номер правки логики разбора (ключ кеша).
 
 - Каждый PR — пункт в `CHANGELOG.md` под «Не выпущено» (сверху).
