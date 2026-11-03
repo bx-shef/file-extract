@@ -302,7 +302,7 @@ export function createApp(deps: AppDeps): Server {
       }
       // Тело могло остаться недочитанным: закрываем соединение после ответа, а не дочитываем
       // его впустую (иначе клиент держал бы сокет, заливая до 20 МБ в никуда).
-      if (CLOSE_STATUSES.has(status)) {
+      if (CLOSE_STATUSES.has(status) || !req.complete) {
         res.setHeader('connection', 'close')
         res.on('finish', () => { if (!req.complete) req.destroy() })
       }

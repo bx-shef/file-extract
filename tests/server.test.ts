@@ -480,6 +480,13 @@ describe('HTTP: POST /v1/convert', () => {
     expect(runners.htmlConvert).not.toHaveBeenCalled()
   })
 
+  it('ранний отказ (нет to) закрывает соединение — недочитанное тело не станет следующим запросом', async () => {
+    const { base } = await start()
+    const r = await fetch(`${base}/v1/convert?to=xls`, { method: 'POST', headers: { authorization: `Bearer ${KEY}` }, body: '<p>x</p>'.repeat(20000) })
+    expect(r.status).toBe(400)
+    expect(r.headers.get('connection')).toBe('close')
+  })
+
   it('GET — 405', async () => {
     const { base } = await start()
     expect((await fetch(`${base}/v1/convert?to=pdf`)).status).toBe(405)

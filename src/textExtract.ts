@@ -86,10 +86,11 @@ export function unsafeHtml(html: string): string | null {
   for (const m of s.matchAll(/url\s*\(\s*["']?\s*([^"')\s]*)/gi)) {
     if (!/^data:image\/(png|jpe?g|gif);/i.test(m[1] ?? '')) return 'url() в стиле (кроме картинки data:)'
   }
-  for (const m of s.matchAll(/\b(src|lowsrc|dynsrc|background|poster|data|codebase|longdesc|usemap|action|formaction|xlink:href)\s*=\s*(["']?)\s*([^"'\s>]*)/gi)) {
+  const tags = (s.match(/<[^>]*>/g) ?? []).join(' ')
+  for (const m of tags.matchAll(/\b(src|lowsrc|dynsrc|background|poster|data|codebase|longdesc|usemap|action|formaction|xlink:href)\s*=\s*(["']?)\s*([^"'\s>]*)/gi)) {
     if (!/^data:image\/(png|jpe?g|gif);/i.test(m[3] ?? '')) return 'путь к файлу в src (картинки — только data:image)'
   }
-  for (const m of s.matchAll(/\bhref\s*=\s*(["']?)\s*([^"'\s>]*)/gi)) {
+  for (const m of tags.matchAll(/\bhref\s*=\s*(["']?)\s*([^"'\s>]*)/gi)) {
     if (!/^(https:|mailto:|#)/i.test(m[2] ?? '')) return 'ссылка href (только https:, mailto:, #)'
   }
   return null
