@@ -6,6 +6,7 @@
 
 ## Не выпущено
 
+- **Сборка документа: HTML → PDF/DOCX** (bx-shef/toolsai-assistant#385, PR #20): `POST /v1/convert?to=pdf|docx`, тело — HTML (UTF-8) до 5 МБ, ответ — байты файла (`application/pdf` / Word). LibreOffice Writer (`--infilter=HTML (StarWriter)`) со своим профилем и настройками безопасности разбора; тот же ключ, очередь, потолок одновременных тел и таймаут, без кеша. HTML проверяется после раскодирования сущностей и CSS-экранов по белому списку: картинки — только `data:image`, ссылки — `https:`/`mailto:`/`#`, `url()` — только `data:image`, без iframe/object/link/base/script/svg/form и `<meta>` кроме `charset="utf-8"`; тело — только UTF-8 без BOM; иначе 400 `unsafe_html` с причиной. Нужен shef.cowork с `disk_doc_build`. Образ пересобрать; новых пакетов нет (`libreoffice-writer` уже в образе).
 - Документация для разработчиков `docs/dev/`: подключение соседнего сервиса, HTTP-контракт, повторы, системные требования; README — `tini` в образе; CLAUDE.md — тег образа как в CI. (лента: нет)
 
 ## 0.2.1 — 2026-11-03

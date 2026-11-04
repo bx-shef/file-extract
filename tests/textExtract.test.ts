@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { ExtractError } from '../src/errors.ts'
 import { planExtraction, SUPPORTED_EXT } from '../src/formats.ts'
 import { extractText, MIN_PDF_TEXT, type ExtractRunners } from '../src/textExtract.ts'
+import { convertTarget, unsafeHtml } from '../src/textExtract.ts'
 
 describe('planExtraction', () => {
   it('выбирает способ по расширению без учёта регистра', () => {
@@ -92,5 +93,29 @@ describe('extractText', () => {
     const out = await extractText('/f.xlsx', 'f.xlsx', r)
     expect(out.text).toBe('цена 100 руб')
     expect(out.sheets[0]).toEqual({ name: 'Л', csv: 'a\tb', rows: 1 })
+  })
+})
+
+describe('convertTarget', () => {
+  it('pdf и docx — фильтры Writer, прочее — null', () => {
+    expect(convertTarget('pdf')).toEqual({ to: 'pdf', filter: 'pdf:writer_pdf_Export', mime: 'application/pdf' })
+    expect(convertTarget('docx')?.filter).toBe('docx:MS Word 2007 XML')
+    expect(convertTarget('docx')?.mime).toBe('application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+    expect(convertTarget('html')).toBeNull()
+    expect(convertTarget('')).toBeNull()
+  })
+})
+
+describe('unsafeHtml', () => {
+  it('обычное КП: таблица, стили, картинка data: и ссылка https — можно', () => {
+    expect(unsafeHtml('<html><head><meta charset="utf-8"><style>td{border:1px solid}</style></head><body><img src="data:image/png;base64,AAA"><a href="https://ex.by/x">сайт</a><table><tr><td>1/2</td></tr></table><p>File: прайс; macro: нет; Profile: кратко; data = 2026; action=звонок</p><table border="1" cellpadding="4" width="100%"><tr><th bgcolor="#1e3a8a">№</th><td valign="top">1</td></tr></table></body></html>')).toBeNull()
+  })
+  it('образец КП из plan/kp-samples-2026-11-04 — можно', () => {
+    expect(unsafeHtml('<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>КП</title><style>body { font-family: "DejaVu Sans", Arial; } .items th { background: #1e3a8a; }</style></head><body><h1>Коммерческое предложение № <span class="fill">заполнить при оформлении</span></h1><table class="items"><tr><th>№</th><th class="num">Сумма</th></tr></table></body></html>')).toBeNull()
+  })
+  it('локальные файлы, вложенные документы, скрипты, команды LibreOffice — нельзя', () => {
+    for (const bad of ['<img src="file:///etc/passwd">', '<iframe src="x">', '<object data="a">', '<link rel=stylesheet href="s.css">', '<script>x</script>', '<style>@import "a.css"</style>', '<a href="vnd.sun.star.script:x">', '<a href="macro:x">', '<div style="background:url(file:///etc/x)">', '<img src="/etc/hosts">', '<img src=../../app/src/config.ts>', '<meta http-equiv="refresh" content="0">', '<base href="/">', '<img src="&#x66;ile:&#x2F;&#x2F;&#x2F;etc&#x2F;passwd">', '<div style="background:url(\\66 ile:///etc/x)">', '<style>@\\69mport "a.css"</style>', '<meta charset="utf-7">', '<svg><image href="x"/></svg>', '<a href="http://169.254.169.254/">', '<img src="https://ex.by/a.png">', '<img src="C:\\x.png">', '<td background="x.png">']) {
+      expect(unsafeHtml(bad), bad).not.toBeNull()
+    }
   })
 })
