@@ -30,6 +30,7 @@ docker build -t file-extract .
 | `src/cache.ts` | ключ кеша (версия, способ, расширение, потолок текста, sha), хранилища на диске (с потолком размера) и в Redis (порт `CacheStore`) |
 | `src/limiter.ts`, `src/truncate.ts`, `src/auth.ts`, `src/config.ts`, `src/log.ts`, `src/errors.ts` | очередь, потолок текста, ключ, настройки (`loadConfig`, `CACHE_TTL_SEC`, `MIN_API_KEY_LENGTH`) и `EXTRACTOR_VERSION`, журнал, коды ошибок |
 | `src/main.ts` | запуск: настройки, выбор кеша, чистка раз в час |
+| `docs/dev/` | для разработчиков соседних сервисов: подключение, HTTP-контракт (`API.md`), системные требования |
 | `tests/` | чистая логика + `server.test.ts` (HTTP на подставных исполнителях, без программ) + `integration.test.ts` (настоящие программы, пропускается без `soffice`) |
 
 Открытые задачи — `gh issue list` (сейчас #3: замеры на ВМ, одинаковые запросы, ключи потребителей, сканирование образа, метрики).
@@ -62,7 +63,7 @@ docker build -t file-extract .
 - Выпустить: отдельный PR — «Не выпущено» → `## X.Y.Z — дата`, та же версия в `package.json`
   (и приставка `EXTRACTOR_VERSION`, если менялась логика разбора); после мержа —
   `gh release create vX.Y.Z --target <sha> --title X.Y.Z --notes-file <раздел CHANGELOG>`.
-- Образ по-прежнему `sha-<коммит>`: toolsai-mcp закрепляет его в `FILE_EXTRACT_TAG`. Вручную образы не пушить.
+- Образ — `ghcr.io/bx-shef/file-extract:<полный sha коммита>` и `latest` (CI на push в `main`): toolsai-mcp закрепляет его в `FILE_EXTRACT_TAG`. Вручную образы не пушить.
 - Сторонние actions в CI — запинены на SHA.
 
 ## Разовые контейнеры проверок
