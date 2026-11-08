@@ -16,7 +16,24 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 2  # глубина 2: слияние PR и его родители; база сравнения — первый родитель (HEAD^1), для шага «Уровень ревью PR»
           persist-credentials: false
+
+      # Уровень ревью PR (tools/review-tier.sh): справочно, ничего не блокирует; CI не знает, проведено ли ревью.
+      # continue-on-error не снимать без решения владельца. Правила — tools/review-tier.rules.
+      - name: Уровень ревью PR
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        run: |
+          action="$(bash tools/review-tier.sh --base HEAD^1 --action)"
+          printf '%s\n' "$action"
+          {
+            echo '### Уровень ревью PR (справочно: проведено ли ревью, CI не проверяет)'
+            printf '%s\n\n' "$action"
+            echo 'По файлам — локально: `bash tools/review-tier.sh --explain`'
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:

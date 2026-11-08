@@ -1,12 +1,13 @@
 # Изменения
 
-> Last reviewed: 2026-10-28
+> Last reviewed: 2026-11-08
 
 Версии — semver; новое — сверху под «Не выпущено», выпуск — `CLAUDE.md`, «Версии и выпуск».
 
 ## Не выпущено
 
 - **Сборка документа: HTML → PDF/DOCX** (bx-shef/toolsai-assistant#385, PR #20): `POST /v1/convert?to=pdf|docx`, тело — HTML (UTF-8) до 5 МБ, ответ — байты файла (`application/pdf` / Word). LibreOffice Writer (`--infilter=HTML (StarWriter)`) со своим профилем и настройками безопасности разбора; тот же ключ, очередь, потолок одновременных тел и таймаут, без кеша. HTML проверяется после раскодирования сущностей и CSS-экранов по белому списку: картинки — только `data:image`, ссылки — `https:`/`mailto:`/`#`, `url()` — только `data:image`, без iframe/object/link/base/script/svg/form и `<meta>` кроме `charset="utf-8"`; тело — только UTF-8 без BOM; иначе 400 `unsafe_html` с причиной. Нужен shef.cowork с `disk_doc_build`. Образ пересобрать; новых пакетов нет (`libreoffice-writer` уже в образе).
+- Ревью PR: уровень по путям файлов (`tools/review-tier.sh`, правила — `tools/review-tier.rules`, сверка — тест `tests/reviewTier.test.ts` в `pnpm check`), навык `review-panel`, раздел «Ревью PR» и режим агентов «экономия» в `CLAUDE.md`. (лента: нет)
 * **LF в рабочей копии на Windows** — `.gitattributes` `* text=auto eol=lf`: с core.autocrlf проверки, читающие исходники, не расходятся. (лента: нет)
 - Документация для разработчиков `docs/dev/`: подключение соседнего сервиса, HTTP-контракт, повторы, системные требования; README — `tini` в образе; CLAUDE.md — тег образа как в CI. (лента: нет)
 

@@ -1,0 +1,70 @@
+# Правила уровня ревью file-extract. Формат и движок — tools/review-tier.sh (копия эталона bx-shef/toolsai; в репозитории правят только этот файл).
+# Решение владельца 2026-11-07 (bx-shef/toolsai-stand#42). Навык — .claude/skills/review-panel/SKILL.md.
+#
+# Первое подходящее правило выигрывает: исключения стоят выше общих. Не подошло ничего — уровень 1.
+# Уровень PR — наибольший по его файлам. Поднять уровень вручную можно, опустить нельзя.
+
+# --- сами правила уровней: ошибка в них тихо снижает ревью; стоят выше «0 *.md» и «0 tests/*» -------
+hold LICENSE                        # лицензия репозитория — решение владельца
+2 tools/review-tier.*                 # движок и правила; всё с этим именем, и .md тоже
+2 tests/reviewTier.test.ts            # тест, который сторожит правила, — сам уровень 2
+
+# --- уровень 0: без ревью, только pnpm check ------------------------------------------------------
+0 .gitattributes|.gitignore
+0 package.json only:^[[:space:]]*"version":   # правка одной строки «version»; любая другая правка package.json — уровень 2 ниже
+0 docs/*                              # документы для разработчиков соседних сервисов
+0 .claude/*                           # навыки
+0 *.md                                # README, CHANGELOG, CLAUDE
+0 tests/*                             # тесты без кода сервиса: уровень задают остальные файлы
+
+# --- уровень 2: панель из пяти ---------------------------------------------------------------------
+# образ и выкладка: digest, tini, программы разбора, сеть, права, лимиты
+2 Dockerfile|.dockerignore|docker-compose.example.yml|.env.example
+# сборка и зависимости: CI, lock-файл
+2 .github/*|package.json|pnpm-lock.yaml
+# ключ, HTTP-контракт, настройки, кеш, запуск внешних программ, журнал, коды ошибок
+2 src/auth.ts|src/server.ts|src/config.ts|src/cache.ts|src/extractRunners.ts|src/log.ts|src/errors.ts
+
+# --- уровень 1: правил нет, действует умолчание ----------------------------------------------------
+# Остальное — формат файла, маршрутизация разбора, очистка и обрезка текста, очередь, запуск,
+# tsconfig.json, vitest.config.ts.
+
+# --- таблица случаев для --self-test ---------------------------------------------------------------
+case 0 README.md
+case 0 CHANGELOG.md
+case 0 CLAUDE.md
+case 0 docs/dev/API.md
+case 0 docs/dev/README.md
+case 0 docs/dev/diagram.png           # не .md: «0 docs/*» держит каталог само
+case 0 .gitattributes
+case 0 .gitignore
+case 0 .claude/skills/review-panel/SKILL.md
+case 0 .claude/skills/review-panel/evals/cases.json   # не .md: «0 .claude/*» держит каталог само
+case 0 tests/server.test.ts
+case 0 tests/limiter.test.ts
+case 1 src/formats.ts
+case 1 src/textExtract.ts
+case 1 src/limiter.ts
+case 1 src/main.ts
+case 1 tsconfig.json
+case 1 vitest.config.ts
+case 2 tools/review-tier.sh
+case 2 tools/review-tier.rules
+case 2 tools/review-tier.md           # .md с именем движка: «2 tools/review-tier.*» стоит выше «0 *.md»
+case 2 tests/reviewTier.test.ts       # тест-страж стоит выше «0 tests/*»
+case 2 package.json                   # без git «только version» не действует; правка одной строки version в ветке — уровень 0
+case 2 pnpm-lock.yaml
+case 2 Dockerfile
+case 2 .dockerignore
+case 2 docker-compose.example.yml
+case 2 .env.example
+case 2 .github/workflows/ci.yml
+case 2 .github/dependabot.yml
+case 2 src/auth.ts
+case 2 src/server.ts
+case 2 src/config.ts
+case 2 src/cache.ts
+case 2 src/extractRunners.ts
+case 2 src/log.ts
+case 2 src/errors.ts
+case 2 LICENSE
