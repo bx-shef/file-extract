@@ -1,11 +1,12 @@
 # Изменения
 
-> Last reviewed: 2026-10-28
+> Last reviewed: 2026-11-08
 
 Версии — semver; новое — сверху под «Не выпущено», выпуск — `CLAUDE.md`, «Версии и выпуск».
 
 ## Не выпущено
 
+- Ревью PR: уровень по путям файлов (`tools/review-tier.sh`, правила — `tools/review-tier.rules`, сверка — тест `tests/reviewTier.test.ts` в `pnpm check`), навык `review-panel`, раздел «Ревью PR» и режим агентов «экономия» в `CLAUDE.md`. (лента: нет)
 * **LF в рабочей копии на Windows** — `.gitattributes` `* text=auto eol=lf`: с core.autocrlf проверки, читающие исходники, не расходятся. (лента: нет)
 - Документация для разработчиков `docs/dev/`: подключение соседнего сервиса, HTTP-контракт, повторы, системные требования; README — `tini` в образе; CLAUDE.md — тег образа как в CI. (лента: нет)
 
