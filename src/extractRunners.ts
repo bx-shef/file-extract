@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import { ExtractError } from './errors.ts'
 import { imageSize, MAX_IMAGE_PIXELS } from './imageSize.ts'
-import type { ExtractRunners, OcrOutput, OfficeOutput, Sheet } from './textExtract.ts'
+import { convertTarget, type ConvertTo, type ExtractRunners, type OcrOutput, type OfficeOutput, type Sheet } from './textExtract.ts'
 
 // Живые исполнители разбора (дочерние процессы). Программы ставятся в образ:
 // pdftotext и pdftoppm (poppler-utils), libreoffice, tesseract с языками rus+bel+kaz+eng.
@@ -166,6 +166,8 @@ async function readSheetCsv(path: string): Promise<string> {
  * - Common/Security/Scripting: MacroSecurityLevel=3 (очень высокий), DisableMacrosExecution —
  *   макросы чужого документа не выполняются;
  * - Common/Security/Scripting/BlockUntrustedRefererLinks — не загружать ссылки из документа
+ *   Не всё: фон <body background="file:///…"> LibreOffice грузит и с ним — адреса документа держит охранник
+ *   htmlGuard (только data:image в <img src>), профиль — вторая линия.
  *   (внешние картинки). ПРОВЕРЕНО ВЖИВУЮ: документ с картинкой по http://127.0.0.1 при выгрузке
  *   в PDF без ключа запрашивает её, с ключом — нет;
  * - Calc/Content/Update/Link=1 (никогда) и Writer/Content/Update/Link=0 (никогда) — не обновлять
@@ -382,7 +384,40 @@ async function ocrImage(path: string, signal: AbortSignal): Promise<OcrOutput> {
   return { text: await run('tesseract', [path, 'stdout', '-l', OCR_LANGS], signal, { dir: dirname(path) }), pages: 1 }
 }
 
+/** Потолок готового документа: больше — отказ (HTML КП в десятки КБ, файл — сотни КБ). */
+export const MAX_CONVERT_OUT_BYTES = 20 * 1024 * 1024
+
+/**
+ * HTML → PDF/DOCX через LibreOffice Writer. `--infilter=HTML (StarWriter)` — HTML открывается
+ * как документ Writer, а не Writer/Web: иначе выгрузка в DOCX недоступна. Свой профиль с теми же
+ * настройками безопасности, что у разбора (внешние ссылки не обновляются, сети в контейнере нет).
+ */
+async function htmlConvert(path: string, to: ConvertTo, signal: AbortSignal): Promise<Buffer> {
+  const target = convertTarget(to)
+  if (!target) throw new ExtractError('unsupported', 'неподдерживаемый формат выгрузки')
+  const dir = await mkdtemp(join(tmpdir(), 'file-extract-convert-'))
+  try {
+    const profile = join(dir, 'loprofile')
+    await mkdir(join(profile, 'user'), { recursive: true })
+    await writeFile(join(profile, 'user', 'registrymodifications.xcu'), LO_REGISTRY)
+    const outDir = join(dir, 'out')
+    await mkdir(outDir)
+    await run('libreoffice', [
+      '-env:UserInstallation=file://' + profile,
+      '--headless', '--infilter=HTML (StarWriter)', '--convert-to', target.filter, '--outdir', outDir, path
+    ], signal, { dir, env: { LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' } })
+    const outs = (await readdir(outDir)).filter(f => f.toLowerCase().endsWith('.' + to))
+    if (!outs.length) throw new ExtractError('failed', 'libreoffice: документ не получен')
+    const out = join(outDir, outs[0] as string)
+    if ((await stat(out)).size > MAX_CONVERT_OUT_BYTES) throw new ExtractError('too_complex', 'слишком большой документ')
+    return await readFile(out)
+  } finally {
+    await rm(dir, { recursive: true, force: true }).catch(() => {})
+  }
+}
+
 export const liveExtractRunners: ExtractRunners = {
+  htmlConvert,
   readText: decodeText,
   pdfToText: (path, signal) => run('pdftotext', ['-layout', '-enc', 'UTF-8', '-l', String(MAX_PDF_TEXT_PAGES), path, '-'], signal, { dir: dirname(path) }),
   officeToText,

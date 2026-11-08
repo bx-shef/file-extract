@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { ExtractError } from '../src/errors.ts'
 import { planExtraction, SUPPORTED_EXT } from '../src/formats.ts'
-import { extractText, MIN_PDF_TEXT, type ExtractRunners } from '../src/textExtract.ts'
+import { convertTarget, extractText, MIN_PDF_TEXT, type ExtractRunners } from '../src/textExtract.ts'
 
 describe('planExtraction', () => {
   it('выбирает способ по расширению без учёта регистра', () => {
@@ -92,5 +92,15 @@ describe('extractText', () => {
     const out = await extractText('/f.xlsx', 'f.xlsx', r)
     expect(out.text).toBe('цена 100 руб')
     expect(out.sheets[0]).toEqual({ name: 'Л', csv: 'a\tb', rows: 1 })
+  })
+})
+
+describe('convertTarget', () => {
+  it('pdf и docx — фильтры Writer, прочее — null', () => {
+    expect(convertTarget('pdf')).toEqual({ to: 'pdf', filter: 'pdf:writer_pdf_Export', mime: 'application/pdf' })
+    expect(convertTarget('docx')?.filter).toBe('docx:MS Word 2007 XML')
+    expect(convertTarget('docx')?.mime).toBe('application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+    expect(convertTarget('html')).toBeNull()
+    expect(convertTarget('')).toBeNull()
   })
 })

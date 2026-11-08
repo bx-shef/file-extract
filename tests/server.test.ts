@@ -1,6 +1,6 @@
 import type { AddressInfo } from 'node:net'
 import { request, type Server } from 'node:http'
-import { mkdtemp, readdir, rm } from 'node:fs/promises'
+import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -10,6 +10,7 @@ import { ExtractError } from '../src/errors.ts'
 import type { LogEntry } from '../src/log.ts'
 import { createApp } from '../src/server.ts'
 import type { ExtractRunners } from '../src/textExtract.ts'
+import { dataUrl, pngHeader } from './imageFixtures.ts'
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const KEY = 'test-key-0123456789abcdef'
@@ -32,6 +33,7 @@ function fakeRunners(over: Partial<ExtractRunners> = {}): ExtractRunners {
     pdfToText: vi.fn(async () => 'текст PDF достаточной длины, чтобы не уходить в OCR'),
     officeToText: vi.fn(async () => ({ text: 'a\tb\nc\td', sheets: [{ name: 'Лист1', csv: 'a\tb\nc\td', rows: 2 }] })),
     ocr: vi.fn(async () => ({ text: 'распознанный текст скана', pages: 3 })),
+    htmlConvert: vi.fn(async (_p: string, to: string) => Buffer.from(to === 'pdf' ? '%PDF-1.7 x' : 'PK x')),
     ...over
   }
 }
@@ -409,5 +411,301 @@ describe('HTTP: занятость и уход клиента', () => {
     expect((await first).status).toBe(200)
     await vi.waitFor(() => expect(logs.some(l => l.error === 'client_aborted')).toBe(true), { timeout: 1000 })
     expect(hits.n).toBe(1) // второй до разбора не дошёл
+  })
+})
+
+describe('HTTP: POST /v1/convert', () => {
+  const conv = (base: string, to: string, body: string, auth: string | null = `Bearer ${KEY}`) =>
+    fetch(`${base}/v1/convert?to=${to}`, { method: 'POST', headers: auth ? { authorization: auth } : {}, body })
+
+  it('PDF: байты файла и тип application/pdf, HTML доходит до исполнителя', async () => {
+    const runners = fakeRunners()
+    const { base, logs } = await start({ runners })
+    const r = await conv(base, 'pdf', '<p>КП</p>')
+    expect(r.status).toBe(200)
+    expect(r.headers.get('content-type')).toBe('application/pdf')
+    expect(Buffer.from(await r.arrayBuffer()).toString('latin1').startsWith('%PDF-')).toBe(true)
+    expect(runners.htmlConvert).toHaveBeenCalledWith(expect.stringMatching(/document\.html$/), 'pdf', expect.anything())
+    expect(logs.find(l => l.evt === 'convert')).toMatchObject({ kind: 'pdf', bytes: Buffer.byteLength('<p>КП</p>') })
+  })
+
+  it('DOCX: тип Word', async () => {
+    const { base } = await start()
+    const r = await conv(base, 'docx', '<p>КП</p>')
+    expect(r.status).toBe(200)
+    expect(r.headers.get('content-type')).toContain('wordprocessingml')
+  })
+
+  it('без ключа — 401, исполнитель не зовётся', async () => {
+    const runners = fakeRunners()
+    const { base } = await start({ runners })
+    expect((await conv(base, 'pdf', '<p>x</p>', null)).status).toBe(401)
+    expect(runners.htmlConvert).not.toHaveBeenCalled()
+  })
+
+  it('неизвестный формат и пустое тело — 400', async () => {
+    const { base } = await start()
+    expect((await conv(base, 'exe', '<p>x</p>')).status).toBe(400)
+    expect((await conv(base, 'pdf', '')).status).toBe(400)
+  })
+
+  it('HTML больше 5 МБ — 413', async () => {
+    const { base } = await start()
+    const r = await conv(base, 'pdf', 'a'.repeat(5 * 1024 * 1024 + 1))
+    expect(r.status).toBe(413)
+  })
+
+  it('сбой LibreOffice — 422 без подробностей пути', async () => {
+    const { base } = await start({ runners: fakeRunners({ htmlConvert: async () => { throw new ExtractError('failed', 'libreoffice: документ не получен') } }) })
+    const r = await conv(base, 'pdf', '<p>x</p>')
+    expect(r.status).toBe(422)
+    expect(await r.json()).toMatchObject({ error: 'extract_failed' })
+  })
+
+  it('HTML с file: — 400 unsafe_html, LibreOffice не зовётся', async () => {
+    const runners = fakeRunners()
+    const { base } = await start({ runners })
+    const r = await conv(base, 'pdf', '<img src="file:///etc/passwd">')
+    expect(r.status).toBe(400)
+    expect(await r.json()).toMatchObject({ error: 'unsafe_html' })
+    expect(runners.htmlConvert).not.toHaveBeenCalled()
+  })
+
+  it('не UTF-8 и UTF-16 с BOM — 400 unsafe_html', async () => {
+    const runners = fakeRunners()
+    const { base } = await start({ runners })
+    for (const body of [Buffer.from([0x3c, 0x70, 0x3e, 0xc0, 0xaf]), Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('<p>КП</p>')])]) {
+      const r = await fetch(`${base}/v1/convert?to=pdf`, { method: 'POST', headers: { authorization: `Bearer ${KEY}` }, body })
+      expect(r.status).toBe(400)
+    }
+    expect(runners.htmlConvert).not.toHaveBeenCalled()
+  })
+
+  it('ранний отказ (нет to) закрывает соединение — недочитанное тело не станет следующим запросом', async () => {
+    const { base } = await start()
+    const r = await fetch(`${base}/v1/convert?to=xls`, { method: 'POST', headers: { authorization: `Bearer ${KEY}` }, body: '<p>x</p>'.repeat(20000) })
+    expect(r.status).toBe(400)
+    expect(r.headers.get('connection')).toBe('close')
+  })
+
+  it('GET — 405', async () => {
+    const { base } = await start()
+    expect((await fetch(`${base}/v1/convert?to=pdf`)).status).toBe(405)
+  })
+
+  it('сборка не подключена — 501 not_implemented, LibreOffice не зовётся', async () => {
+    const { base } = await start({ runners: fakeRunners({ htmlConvert: undefined }) })
+    const r = await conv(base, 'pdf', '<p>x</p>')
+    expect(r.status).toBe(501)
+    expect(await r.json()).toMatchObject({ error: 'not_implemented' })
+  })
+
+  it('обходы проверки из ревью — 400 unsafe_html с причиной, LibreOffice не зовётся', async () => {
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg"><image href="file:///etc/passwd"/></svg>'
+    const runners = fakeRunners()
+    const { base } = await start({ runners })
+    for (const bad of [
+      '<img alt=">" src="file:///etc/passwd">',
+      '<td title=">" background="file:///etc/passwd">',
+      `<img src="${dataUrl('image/png', svg)}">`,
+      `<img src="${dataUrl('image/png', pngHeader(100_000, 100_000))}">`,
+      '<p style="background:url(file:///etc/passwd)">x</p>'
+    ]) {
+      const r = await conv(base, 'pdf', bad)
+      expect(r.status, bad.slice(0, 60)).toBe(400)
+      const j = (await r.json()) as any
+      expect(j.error).toBe('unsafe_html')
+      expect(j.message).toMatch(/^HTML не собирается: .{10,}/)
+    }
+    expect(runners.htmlConvert).not.toHaveBeenCalled()
+  })
+
+  it('200 000 знаков «<» — отвечает быстро, главный поток не замирает (/health жив)', async () => {
+    const { base } = await start()
+    const started = Date.now()
+    const r = await conv(base, 'pdf', '<'.repeat(200_000))
+    expect(r.status).toBe(200)
+    expect(Date.now() - started).toBeLessThan(1_000)
+    expect((await fetch(`${base}/health`)).status).toBe(200)
+  })
+
+  it('в LibreOffice уходит пересобранный HTML: без комментариев, в канонической записи', async () => {
+    let seen = ''
+    const runners = fakeRunners({ htmlConvert: async (p) => { seen = await readFile(p, 'utf8'); return Buffer.from('%PDF-1.7 x') } })
+    const { base } = await start({ runners })
+    const r = await conv(base, 'pdf', "<!-- c --><P Class=a title='x\">y'>КП<br/></P>")
+    expect(r.status).toBe(200)
+    expect(seen).toBe('<p class="a" title="x&quot;&gt;y">КП<br></p>')
+  })
+
+  it('ссылки — текстом: в HTML для LibreOffice нет <a> и href, текст остаётся', async () => {
+    let seen = ''
+    const runners = fakeRunners({ htmlConvert: async (p) => { seen = await readFile(p, 'utf8'); return Buffer.from('%PDF-1.7 x') } })
+    const { base } = await start({ runners })
+    const r = await conv(base, 'pdf', '<p>Счёт: <a href="https://evil.example/">оплатить</a></p>')
+    expect(r.status).toBe(200)
+    expect(seen).toBe('<p>Счёт: оплатить</p>')
+    expect(seen).not.toContain('href')
+    expect(seen).not.toContain('<a')
+  })
+
+  it('временный каталог file-extract-html-* убран после успеха, сбоя LibreOffice и отказа проверки', async () => {
+    const tmp = await mkdtemp(join(tmpdir(), 'fe-conv-'))
+    const old = process.env.TMPDIR
+    process.env.TMPDIR = tmp
+    try {
+      let n = 0
+      const runners = fakeRunners({ htmlConvert: async () => { if (n++) throw new ExtractError('failed', 'x'); return Buffer.from('%PDF-1.7 x') } })
+      const { base } = await start({ runners })
+      expect((await conv(base, 'pdf', '<p>1</p>')).status).toBe(200)
+      expect((await conv(base, 'pdf', '<p>2</p>')).status).toBe(422)
+      expect((await conv(base, 'pdf', '<img src="file:///etc/passwd">')).status).toBe(400)
+      expect((await readdir(tmp)).filter(f => f.startsWith('file-extract-html-'))).toEqual([])
+    } finally {
+      if (old === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = old
+      await rm(tmp, { recursive: true, force: true })
+    }
+  })
+
+  describe('занятость, очередь и таймаут', () => {
+    /** Сборка, которая занимает место на `ms` и слушает сигнал (как LibreOffice под run()). */
+    const slow = (ms: number, hits?: { n: number }) => fakeRunners({
+      htmlConvert: (_p, _to, signal) => new Promise((resolve, reject) => {
+        if (hits) hits.n++
+        const t = setTimeout(() => resolve(Buffer.from('%PDF-1.7 x')), ms)
+        signal.addEventListener('abort', () => { clearTimeout(t); reject(new ExtractError('timeout', 't')) })
+      })
+    })
+
+    it('503 busy, когда тела читают уже столько запросов, сколько сборок + очередь; соединение закрывается', async () => {
+      const { port, base } = await start({ config: { maxConcurrency: 1, maxQueue: 0 } })
+      const hold = request({ host: '127.0.0.1', port, path: '/v1/convert?to=pdf', method: 'POST', agent: false, headers: { authorization: `Bearer ${KEY}`, 'content-length': 10 } })
+      hold.on('error', () => {})
+      hold.write('<p>') // тело не дописано: запрос держит место чтения
+      await new Promise(r => setTimeout(r, 30))
+      const r = await conv(base, 'pdf', '<p>x</p>')
+      expect(r.status).toBe(503)
+      expect(await r.json()).toMatchObject({ error: 'busy' })
+      expect(r.headers.get('connection')).toBe('close')
+      hold.destroy()
+    })
+
+    it('503 busy по таймауту ожидания места в очереди', async () => {
+      const { base } = await start({ runners: slow(200), config: { maxConcurrency: 1, queueTimeoutMs: 20 } })
+      const [a, b] = await Promise.all([conv(base, 'pdf', '<p>1</p>'), new Promise(r => setTimeout(r, 10)).then(() => conv(base, 'pdf', '<p>2</p>'))])
+      expect(a.status).toBe(200)
+      expect(b.status).toBe(503)
+      expect(((await b.json()) as any).error).toBe('busy')
+    })
+
+    it('очередь: сверх MAX_QUEUE — 503 сразу, остальные дожидаются и получают файл', async () => {
+      const { base } = await start({ runners: slow(150), config: { maxConcurrency: 1, maxQueue: 1, queueTimeoutMs: 5000 } })
+      const started = Date.now()
+      const rs = await Promise.all([1, 2, 3].map((i) => new Promise(r => setTimeout(r, i * 10)).then(() => conv(base, 'pdf', `<p>${i}</p>`))))
+      expect(rs.map(r => r.status).sort()).toEqual([200, 200, 503])
+      expect(Date.now() - started).toBeLessThan(1000)
+    })
+
+    it('не больше MAX_CONCURRENCY сборок одновременно', async () => {
+      let active = 0
+      let peak = 0
+      const runners = fakeRunners({
+        htmlConvert: async () => {
+          active++; peak = Math.max(peak, active)
+          await new Promise(r => setTimeout(r, 30))
+          active--
+          return Buffer.from('%PDF-1.7 x')
+        }
+      })
+      const { base } = await start({ runners, config: { maxConcurrency: 2 } })
+      const rs = await Promise.all([1, 2, 3, 4, 5].map(i => conv(base, 'pdf', `<p>${i}</p>`)))
+      expect(rs.every(r => r.status === 200)).toBe(true)
+      expect(peak).toBe(2)
+    })
+
+    it('клиент ушёл, пока ждал места, — ожидающий снимается с очереди, в журнале client_aborted', async () => {
+      const logs: LogEntry[] = []
+      const hits = { n: 0 }
+      const { port, base } = await start({ logs, runners: slow(150, hits), config: { maxConcurrency: 1, queueTimeoutMs: 5000 } })
+      const first = conv(base, 'pdf', '<p>1</p>')
+      await new Promise(r => setTimeout(r, 20))
+      await new Promise<void>((resolve) => {
+        const req = request({ host: '127.0.0.1', port, path: '/v1/convert?to=pdf', method: 'POST', agent: false, headers: { authorization: `Bearer ${KEY}`, 'content-length': 8 } })
+        req.on('error', () => {})
+        req.end('<p>2</p>')
+        setTimeout(() => { req.destroy(); resolve() }, 30)
+      })
+      expect((await first).status).toBe(200)
+      await vi.waitFor(() => expect(logs.some(l => l.evt === 'convert' && l.error === 'client_aborted')).toBe(true), { timeout: 1000 })
+      expect(hits.n).toBe(1) // вторая до LibreOffice не дошла
+    })
+
+    it('клиент ушёл во время сборки — LibreOffice прерывается, в журнале client_aborted, не 500', async () => {
+      const logs: LogEntry[] = []
+      let aborted = false
+      // как настоящая сборка: после сигнала сначала прибирает за собой (rm каталога), потом отказывает
+      const runners = fakeRunners({
+        htmlConvert: async (_p, _to, signal) => {
+          await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }))
+          aborted = true
+          await new Promise(r => setTimeout(r, 5))
+          throw new ExtractError('timeout', 't')
+        }
+      })
+      const { port } = await start({ runners, logs, config: { extractTimeoutMs: 10_000 } })
+      await new Promise<void>((resolve) => {
+        const req = request({ host: '127.0.0.1', port, path: '/v1/convert?to=pdf', method: 'POST', agent: false, headers: { authorization: `Bearer ${KEY}`, 'content-length': 8 } })
+        req.on('error', () => {})
+        req.end('<p>1</p>')
+        setTimeout(() => { req.destroy(); resolve() }, 50)
+      })
+      await vi.waitFor(() => expect(logs.some(l => l.evt === 'convert' && l.error === 'client_aborted')).toBe(true), { timeout: 1000 })
+      expect(aborted).toBe(true)
+    })
+
+    it('504 по таймауту, сигнал доходит до LibreOffice, временный каталог убран', async () => {
+      const tmp = await mkdtemp(join(tmpdir(), 'fe-conv-'))
+      const old = process.env.TMPDIR
+      process.env.TMPDIR = tmp
+      try {
+        let aborted = false
+        const runners = fakeRunners({
+          htmlConvert: (_p, _to, signal) => new Promise((_, reject) => {
+            signal.addEventListener('abort', () => { aborted = true; reject(new ExtractError('timeout', 't')) })
+          })
+        })
+        const { base } = await start({ runners, config: { extractTimeoutMs: 50 } })
+        const r = await conv(base, 'pdf', '<p>x</p>')
+        expect(r.status).toBe(504)
+        expect(((await r.json()) as any).error).toBe('timeout')
+        expect(aborted).toBe(true)
+        expect((await readdir(tmp)).filter(f => f.startsWith('file-extract-html-'))).toEqual([])
+      } finally {
+        if (old === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = old
+        await rm(tmp, { recursive: true, force: true })
+      }
+    })
+
+    it('504 вовремя, даже если сборка сигнал не слушает', async () => {
+      const runners = fakeRunners({ htmlConvert: () => new Promise(resolve => setTimeout(() => resolve(Buffer.from('%PDF-1.7 x')), 400)) })
+      const { base } = await start({ runners, config: { extractTimeoutMs: 50 } })
+      const started = Date.now()
+      const r = await conv(base, 'pdf', '<p>x</p>')
+      expect(r.status).toBe(504)
+      expect(Date.now() - started).toBeLessThan(300)
+    })
+
+    it('после таймаута место возвращается: следующая сборка проходит', async () => {
+      let n = 0
+      const runners = fakeRunners({
+        htmlConvert: (_p, _to, signal) => new Promise((resolve, reject) => {
+          if (n++ === 0) signal.addEventListener('abort', () => reject(new ExtractError('timeout', 't')))
+          else resolve(Buffer.from('%PDF-1.7 x'))
+        })
+      })
+      const { base } = await start({ runners, config: { maxConcurrency: 1, maxQueue: 0, extractTimeoutMs: 50 } })
+      expect((await conv(base, 'pdf', '<p>1</p>')).status).toBe(504)
+      expect((await conv(base, 'pdf', '<p>2</p>')).status).toBe(200)
+    })
   })
 })
