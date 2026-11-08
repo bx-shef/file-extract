@@ -73,7 +73,10 @@ describe('unsafeHtml: что нельзя', () => {
     for (const attr of ['src', 'lowsrc', 'dynsrc', 'background', 'poster', 'data', 'codebase', 'longdesc', 'usemap', 'action', 'formaction', 'xlink:href']) {
       expect(unsafeHtml(`<p ${attr}="x.png">x</p>`), attr).toMatch(new RegExp(`^${attr}: `))
       expect(unsafeHtml(`<p ${attr.toUpperCase()}=x.png>x</p>`), attr).not.toBeNull()
-      expect(unsafeHtml(`<p ${attr}="${PNG}">x</p>`), attr).toBeNull()
+      const withPng = unsafeHtml(`<p ${attr}="${PNG}">x</p>`)
+      // фон картинкой — отказ и с data:image (LibreOffice мостит им страницу), остальные — пускают data:image
+      if (attr === 'background') expect(withPng, attr).toMatch(/^background: фон картинкой/)
+      else expect(withPng, attr).toBeNull()
     }
   })
   it('обход через «>» внутри значения в кавычках: img src, td background (в a — см. «ссылки — текстом»)', () => {
@@ -245,8 +248,8 @@ describe('unsafeHtml: картинки data: проверяются по сод�
     expect(unsafeHtml(`<img src="${a}"><img src="${a}">`)).toBeNull()
     expect(unsafeHtml(`<img src="${a}"><img src="${a}"><img src="${dataUrl('image/png', pngHeader(1, 1))}">`)).toMatch(/больше 50000000 пикселей/)
     expect(unsafeHtml(`<img src="${a}"><p style="background:url(${a})">x</p>`)).toBeNull()
-    expect(unsafeHtml(`<img src="${a}"><p style="background:url(${a})">x</p><td background="${dataUrl('image/gif', gifHeader(1, 1))}">`)).toMatch(/больше 50000000 пикселей/)
-    expect(unsafeHtml(`<td background="${a}"></td><p style="background:url(${a})">x</p><i style="background:url(${dataUrl('image/gif', gifHeader(1, 1))})">`)).toMatch(/больше 50000000 пикселей/)
+    expect(unsafeHtml(`<img src="${a}"><p style="background:url(${a})">x</p><img src="${dataUrl('image/gif', gifHeader(1, 1))}">`)).toMatch(/больше 50000000 пикселей/)
+    expect(unsafeHtml(`<img src="${a}"><p style="background:url(${a})">x</p><i style="background:url(${dataUrl('image/gif', gifHeader(1, 1))})">`)).toMatch(/больше 50000000 пикселей/)
   })
 })
 
