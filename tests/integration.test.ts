@@ -6,7 +6,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { liveExtractRunners } from '../src/extractRunners.ts'
+import { checkHtml } from '../src/htmlGuard.ts'
 import { extractText } from '../src/textExtract.ts'
+import { dataUrl, png } from './imageFixtures.ts'
 
 const has = (bin: string): boolean => spawnSync('sh', ['-c', `command -v ${bin}`]).status === 0
 const ready = has('soffice') && has('pdftotext')
@@ -77,6 +79,52 @@ describe.skipIf(!ready)('настоящие программы разбора', 
     expect(docx.subarray(0, 2).toString('latin1')).toBe('PK')
     await writeFile(join(dir, 'kp-out.docx'), docx)
     expect((await extractText(join(dir, 'kp-out.docx'), 'kp.docx', liveExtractRunners, signal)).text).toContain('Коммерческое предложение')
+  }, 120_000)
+
+  it('пересборка HTML не меняет документ: текст PDF из исходного и из пересобранного совпадает', async () => {
+    const raw = `<!DOCTYPE html>
+<HTML lang=ru>
+<HEAD><META charset=utf-8><TITLE>КП</TITLE>
+<STYLE><!-- body { font-family: "DejaVu Sans", Arial; } th { background: #1e3a8a; color: #fff } --></STYLE>
+</HEAD>
+<BODY>
+<!-- служебный комментарий -->
+<H1>Коммерческое предложение № 17</H1>
+<P class=lead>Уважаемый клиент!&nbsp;Направляем «предложение»&nbsp;&mdash; всё по <A HREF="https://ex.by/offer" target=_blank>ссылке</A>.<BR/>Вторая строка &amp; конец.</P>
+<TABLE border=1 cellpadding=4 width="100%">
+<TR><TH>№</TH><TH colspan=2>Наименование</TH><TH>Сумма</TH></TR>
+<TR><TD>1</TD><TD bgcolor=#eeeeee colspan=2>Гвоздь 4×100</TD><TD align=right>12,50</TD></TR>
+</TABLE>
+</BODY></HTML>`
+    const checked = checkHtml(raw)
+    if (!checked.ok) throw new Error(checked.reason)
+    expect(checked.html).not.toContain('служебный')
+    expect(checked.html).not.toContain('href')
+    const textOf = async (name: string, source: string): Promise<string> => {
+      await writeFile(join(dir, `${name}.html`), source)
+      await writeFile(join(dir, `${name}.pdf`), await liveExtractRunners.htmlConvert!(join(dir, `${name}.html`), 'pdf', signal))
+      return (await extractText(join(dir, `${name}.pdf`), `${name}.pdf`, liveExtractRunners, signal)).text
+    }
+    const before = await textOf('kp-raw', raw)
+    const after = await textOf('kp-clean', checked.html)
+    expect(after).toBe(before)
+    expect(after).toContain('Гвоздь 4×100')
+    expect(after).toContain('ссылке')
+    await writeFile(join(dir, 'kp-clean.docx'), await liveExtractRunners.htmlConvert!(join(dir, 'kp-clean.html'), 'docx', signal))
+    expect((await extractText(join(dir, 'kp-clean.docx'), 'kp-clean.docx', liveExtractRunners, signal)).text).toContain('Гвоздь 4×100')
+    expect(sofficeLeft()).toBe(0)
+  }, 180_000)
+  it('картинка data:image/png доходит до PDF; svg под меткой png и огромный PNG отклоняются до LibreOffice', async () => {
+    const good = checkHtml(`<p>КП</p><img src="${dataUrl('image/png', png(13, 7))}">`)
+    if (!good.ok) throw new Error(good.reason)
+    await writeFile(join(dir, 'img.html'), good.html)
+    await writeFile(join(dir, 'img.pdf'), await liveExtractRunners.htmlConvert!(join(dir, 'img.html'), 'pdf', signal))
+    const listed = execFileSync('pdfimages', ['-list', join(dir, 'img.pdf')]).toString().split('\n').slice(2).filter(Boolean)
+    expect(listed.map(l => l.trim().split(/\s+/).slice(3, 5).join('x'))).toContain('13x7')
+
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="9" height="9"><image href="file:///etc/passwd" width="9" height="9"/></svg>'
+    expect(checkHtml(`<img src="${dataUrl('image/png', svg)}">`)).toMatchObject({ ok: false })
+    expect(checkHtml(`<img src="${dataUrl('image/png', png(2, 2).fill(0xff, 16, 24))}">`)).toMatchObject({ ok: false }) // размеры 4 294 967 295 × 4 294 967 295
   }, 120_000)
 
   it('pdf с текстом', async () => {

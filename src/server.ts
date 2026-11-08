@@ -10,7 +10,8 @@ import { ExtractError } from './errors.ts'
 import { planExtraction } from './formats.ts'
 import { Limiter, QueueAbortedError, QueueTimeoutError } from './limiter.ts'
 import { errorClassOf, shortSha, type LogEntry, type Logger } from './log.ts'
-import { convertTarget, extractText, unsafeHtml, type ExtractRunners, type Sheet } from './textExtract.ts'
+import { checkHtml } from './htmlGuard.ts'
+import { convertTarget, extractText, type ExtractRunners, type Sheet } from './textExtract.ts'
 import { applyTextLimit } from './truncate.ts'
 
 export interface ExtractResponse {
@@ -242,8 +243,9 @@ export function createApp(deps: AppDeps): Server {
       let text: string
       try { text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(body) } catch { throw new HttpError(400, 'unsafe_html', 'HTML не собирается: нужна кодировка UTF-8') }
       if (text.charCodeAt(0) === 0xfeff) throw new HttpError(400, 'unsafe_html', 'HTML не собирается: нужна кодировка UTF-8 без BOM')
-      const unsafe = unsafeHtml(text)
-      if (unsafe) throw new HttpError(400, 'unsafe_html', `HTML не собирается: ${unsafe}`)
+      // LibreOffice получает не присланный текст, а пересобранный проверкой (htmlGuard.ts)
+      const checked = checkHtml(text)
+      if (!checked.ok) throw new HttpError(400, 'unsafe_html', `HTML не собирается: ${checked.reason}`)
       const waitStart = now()
       let release: () => void
       try {
@@ -264,7 +266,7 @@ export function createApp(deps: AppDeps): Server {
         if (signal.aborted) throw clientAborted()
         dir = await mkdtemp(join(tmpdir(), 'file-extract-html-'))
         const input = join(dir, 'document.html')
-        await writeFile(input, body, { mode: 0o600 })
+        await writeFile(input, checked.html, { mode: 0o600 })
         const out = await Promise.race([
           runners.htmlConvert(input, target.to, ac.signal),
           new Promise<never>((_, reject) => {

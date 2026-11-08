@@ -44,58 +44,6 @@ export interface ExtractRunners {
 
 export type ConvertTo = 'pdf' | 'docx'
 
-/**
- * Привести HTML к виду для проверки: раскодировать сущности (`&#x66;`, `&#102;`, `&colon;`…) и
- * CSS-экранирование (`\66 `, `\/`), убрать переносы внутри экранов. LibreOffice понимает и то и
- * другое, поэтому проверка смотрит на то, что увидит он, а не на сырой текст. Чистая.
- */
-export function normalizeHtml(html: string): string {
-  const named: Record<string, string> = { colon: ':', sol: '/', bsol: '\\', lpar: '(', rpar: ')', period: '.', amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", tab: '\t', newline: '\n', num: '#', commat: '@' }
-  let s = html
-  for (let i = 0; i < 3; i++) {
-    const before = s
-    s = s
-      .replace(/&#x([0-9a-f]{1,6});?/gi, (_, h: string) => String.fromCodePoint(Math.min(parseInt(h, 16), 0x10ffff)))
-      .replace(/&#(\d{1,7});?/g, (_, d: string) => String.fromCodePoint(Math.min(parseInt(d, 10), 0x10ffff)))
-      .replace(/&([a-z]+);/gi, (m, n: string) => named[n.toLowerCase()] ?? m)
-      .replace(/\\\r?\n/g, '')
-      .replace(/\\([0-9a-f]{1,6})\s?/gi, (_, h: string) => String.fromCodePoint(Math.min(parseInt(h, 16), 0x10ffff)))
-      .replace(/\\(.)/g, '$1')
-    if (s === before) break
-  }
-  // eslint-disable-next-line no-control-regex
-  return s.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, '')
-}
-
-/**
- * HTML, который LibreOffice не должен открывать. Сборке нужны текст, таблицы, стили внутри
- * `<style>`/`style=` и картинки `data:image/…`; всё прочее со ссылками — отказ:
- *  - `src` — только `data:image/(png|jpeg|gif)`; `href` — только `https:`, `mailto:`, `#`;
- *  - `url(` в стилях — только `data:image/…`; `@import` — нет;
- *  - вложенные документы и активное (iframe/object/embed/frame/applet/link/base/script/svg/math/form), любые `<meta>`, кроме
- *    `charset="utf-8"`; команды LibreOffice (`vnd.sun.star`, `macro:`, `.uno:`).
- * Проверяется раскодированный текст (normalizeHtml). Кодировку проверяет вызывающий (только UTF-8 без BOM). Чистая.
- */
-export function unsafeHtml(html: string): string | null {
-  const s = normalizeHtml(html)
-  if (/<\s*(iframe|object|embed|frame|frameset|applet|link|base|script|svg|math|form|input|isindex|xml|import)\b/i.test(s)) return 'вложенный документ, форма или скрипт'
-  for (const m of s.matchAll(/<\s*meta\b[^>]*>/gi)) {
-    if (!/^<\s*meta\s+charset\s*=\s*["']?utf-8["']?\s*\/?\s*>$/i.test(m[0])) return 'тег meta (кроме charset="utf-8")'
-  }
-  if (/@import/i.test(s)) return 'внешний стиль (@import)'
-  for (const m of s.matchAll(/url\s*\(\s*["']?\s*([^"')\s]*)/gi)) {
-    if (!/^data:image\/(png|jpe?g|gif);/i.test(m[1] ?? '')) return 'url() в стиле (кроме картинки data:)'
-  }
-  const tags = (s.match(/<[^>]*>/g) ?? []).join(' ')
-  for (const m of tags.matchAll(/\b(src|lowsrc|dynsrc|background|poster|data|codebase|longdesc|usemap|action|formaction|xlink:href)\s*=\s*(["']?)\s*([^"'\s>]*)/gi)) {
-    if (!/^data:image\/(png|jpe?g|gif);/i.test(m[3] ?? '')) return 'путь к файлу в src (картинки — только data:image)'
-  }
-  for (const m of tags.matchAll(/\bhref\s*=\s*(["']?)\s*([^"'\s>]*)/gi)) {
-    if (!/^(https:|mailto:|#)/i.test(m[2] ?? '')) return 'ссылка href (только https:, mailto:, #)'
-  }
-  return null
-}
-
 /** Цель выгрузки HTML: фильтр LibreOffice и тип ответа. Чистая. */
 export function convertTarget(to: string): { to: ConvertTo, filter: string, mime: string } | null {
   if (to === 'pdf') return { to, filter: 'pdf:writer_pdf_Export', mime: 'application/pdf' }
