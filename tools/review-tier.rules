@@ -22,8 +22,8 @@ hold LICENSE                        # лицензия репозитория �
 2 Dockerfile|.dockerignore|docker-compose.example.yml|.env.example
 # сборка и зависимости: CI, lock-файл
 2 .github/*|package.json|pnpm-lock.yaml
-# ключ, HTTP-контракт, настройки, кеш, запуск внешних программ, журнал, коды ошибок
-2 src/auth.ts|src/server.ts|src/config.ts|src/cache.ts|src/extractRunners.ts|src/log.ts|src/errors.ts
+# ключ, HTTP-контракт, настройки, кеш, запуск внешних программ, журнал, коды ошибок, проверка HTML для сборки
+2 src/auth.ts|src/server.ts|src/config.ts|src/cache.ts|src/extractRunners.ts|src/log.ts|src/errors.ts|src/htmlGuard.ts
 
 # --- уровень 1: правил нет, действует умолчание ----------------------------------------------------
 # Остальное — формат файла, маршрутизация разбора, очистка и обрезка текста, очередь, запуск,
@@ -67,4 +67,5 @@ case 2 src/cache.ts
 case 2 src/extractRunners.ts
 case 2 src/log.ts
 case 2 src/errors.ts
+case 2 src/htmlGuard.ts
 case 2 LICENSE
