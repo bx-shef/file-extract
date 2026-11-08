@@ -185,6 +185,9 @@ function startTag(t: Tag, budget: Budget): string {
     if (seen.has(name)) continue
     seen.add(name)
     if (name === 'href') continue // ссылок-кликов нет
+    // Фон картинкой LibreOffice мостит на всю страницу: PNG 1×1 в <body background> — миллионы вставок и
+    // десятки секунд сборки на страницу (замер 08.11). Фона в документе нет: картинки — только <img src>.
+    if (name === 'background') throw new Unsafe('background: фон картинкой не поддерживается, картинка — только <img src>')
     if (value === null) { out += ' ' + name; continue }
     if (URL_ATTRS.has(name)) {
       const problem = imageProblem(value, budget)

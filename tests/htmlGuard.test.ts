@@ -26,6 +26,9 @@ describe('unsafeHtml: что можно', () => {
   })
   it('url(data:image…) в style= (двойные, одинарные кавычки и без) и в <style>', () => {
     expect(unsafeHtml(`<td style="background:url('${PNG}')">1</td>`)).toBeNull()
+    // фон-атрибут с картинкой — отказ при любом значении: LibreOffice мостит им всю страницу
+    expect(unsafeHtml(`<body background="${PNG}"><p>x</p></body>`)).toMatch(/background/)
+    expect(unsafeHtml(`<table BACKGROUND='${PNG}'><tr><td>1</td></tr></table>`)).toMatch(/background/)
     expect(unsafeHtml(`<td style='background:url("${PNG}")'>1</td>`)).toBeNull()
     expect(unsafeHtml(`<td style="background:url(${PNG}) no-repeat">1</td>`)).toBeNull()
     expect(unsafeHtml(`<style>.logo { background: URL( ${PNG} ) }</style><p class="logo">x</p>`)).toBeNull()

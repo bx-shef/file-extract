@@ -166,6 +166,8 @@ async function readSheetCsv(path: string): Promise<string> {
  * - Common/Security/Scripting: MacroSecurityLevel=3 (очень высокий), DisableMacrosExecution —
  *   макросы чужого документа не выполняются;
  * - Common/Security/Scripting/BlockUntrustedRefererLinks — не загружать ссылки из документа
+ *   Не всё: фон <body background="file:///…"> LibreOffice грузит и с ним — адреса документа держит охранник
+ *   htmlGuard (только data:image в <img src>), профиль — вторая линия.
  *   (внешние картинки). ПРОВЕРЕНО ВЖИВУЮ: документ с картинкой по http://127.0.0.1 при выгрузке
  *   в PDF без ключа запрашивает её, с ключом — нет;
  * - Calc/Content/Update/Link=1 (никогда) и Writer/Content/Update/Link=0 (никогда) — не обновлять
