@@ -28,10 +28,13 @@ export interface CacheKeyInput {
   maxTextChars: number
   /** Версия разборщика — чтобы после правки разбора старый результат не отдавался. */
   version: string
+  /** Зрение у картинок (`visionCacheKey`: модель, версия запроса, потолок ответа); у остальных и без зрения — пусто.
+   *  Иначе после включения зрения сутки отдавался бы ответ без описания. */
+  vision: string
 }
 
 /** Версия формы ключа: поднимается, когда меняется набор полей ниже. */
-const KEY_FORMAT = 'k2'
+const KEY_FORMAT = 'k3'
 
 /**
  * Ключ кеша: sha256 от всех входов, от которых зависит ответ (см. CacheKeyInput).
@@ -39,7 +42,7 @@ const KEY_FORMAT = 'k2'
  */
 export function cacheKey(k: CacheKeyInput): string {
   return createHash('sha256')
-    .update([KEY_FORMAT, k.version, k.kind, k.ext, String(k.maxTextChars), k.sha].join('\n'))
+    .update([KEY_FORMAT, k.version, k.kind, k.ext, String(k.maxTextChars), k.vision, k.sha].join('\n'))
     .digest('hex')
 }
 

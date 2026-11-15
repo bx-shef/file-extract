@@ -13,6 +13,7 @@ import { errorClassOf, shortSha, type LogEntry, type Logger } from './log.ts'
 import { checkHtml } from './htmlGuard.ts'
 import { convertTarget, extractText, type ExtractRunners, type Sheet } from './textExtract.ts'
 import { applyTextLimit } from './truncate.ts'
+import { visionCacheKey } from './vision.ts'
 
 export interface ExtractResponse {
   text: string
@@ -20,6 +21,8 @@ export interface ExtractResponse {
   ocr: boolean
   truncated: boolean
   pages?: number
+  /** Описание картинки сервисом зрения (оно же — в начале `text`); только у картинок со зрением. */
+  description?: string
   cached: boolean
   kind: string
   sha256: string
@@ -161,7 +164,8 @@ export function createApp(deps: AppDeps): Server {
       ctx.bytes = body.length
       if (body.length === 0) throw new HttpError(400, 'bad_request', 'пустое тело запроса')
       const sha = createHash('sha256').update(body).digest('hex')
-      const key = cacheKey({ sha, kind: plan.kind, ext: plan.ext, maxTextChars: config.maxTextChars, version: EXTRACTOR_VERSION })
+      const vision = plan.kind === 'image' ? visionCacheKey(config.vision) : ''
+      const key = cacheKey({ sha, kind: plan.kind, ext: plan.ext, maxTextChars: config.maxTextChars, version: EXTRACTOR_VERSION, vision })
 
       const hit = await cache.get(key).catch(() => null) // недоступный кеш — не повод отказать
       // испорченная запись кеша (обрыв записи на диск, чужое значение в Redis) — как промах, а не 500 на сутки
@@ -203,6 +207,7 @@ export function createApp(deps: AppDeps): Server {
           ocr: r.ocr,
           truncated: lim.truncated,
           ...(r.pages !== undefined ? { pages: r.pages } : {}),
+          ...(r.description !== undefined ? { description: r.description } : {}),
           kind: r.kind,
           sha256: sha,
           extractorVersion: EXTRACTOR_VERSION

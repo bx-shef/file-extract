@@ -1,6 +1,8 @@
 // Настройки из окружения. Разбор чистый: env передаётся параметром → проверяется тестом.
 
-export const EXTRACTOR_VERSION = '0.2.0-1'
+import type { VisionConfig } from './vision.ts'
+
+export const EXTRACTOR_VERSION = '0.2.0-2'
 // ⚠ Поднимать при ЛЮБОЙ смене логики разбора (исполнители, чистка, листы, потолки): версия
 // входит в ключ кеша, и старый результат после правки иначе отдавался бы ещё сутки.
 
@@ -21,6 +23,8 @@ export interface Config {
   redisUrl: string | null
   cacheDir: string
   cacheMaxBytes: number
+  /** Зрение — описание картинок сервисом toolsai-light `vision`; null — картинки только OCR. */
+  vision: VisionConfig | null
 }
 
 export class ConfigError extends Error {}
@@ -31,6 +35,30 @@ function int(env: Record<string, string | undefined>, name: string, def: number,
   const n = Number(raw)
   if (!Number.isInteger(n) || n < min) throw new ConfigError(`${name}: ожидается целое число не меньше ${min}`)
   return n
+}
+
+/**
+ * Зрение: VISION_URL — база OpenAI-совместимого API (http://vision:8080/v1). Пусто — зрения нет.
+ * Адрес без ключа — ошибка запуска, а не тихое «без зрения»: администратор хотел зрение.
+ * Таймаут зрения меньше таймаута разбора: иначе долгий ответ модели губил бы и текст OCR.
+ */
+function visionConfig(env: Record<string, string | undefined>, extractTimeoutMs: number): VisionConfig | null {
+  const url = (env.VISION_URL ?? '').trim()
+  if (url === '') return null
+  if (!/^https?:\/\/[^\s/?#]+(\/[^\s?#]*)?$/.test(url)) {
+    throw new ConfigError('VISION_URL: ожидается адрес http(s)://хост[:порт]/путь, например http://vision:8080/v1')
+  }
+  const apiKey = env.VISION_API_KEY ?? ''
+  if (apiKey === '') throw new ConfigError('VISION_API_KEY не задан: без ключа сервис зрения не ответит')
+  const timeoutMs = int(env, 'VISION_TIMEOUT_MS', 150_000, 1)
+  if (timeoutMs >= extractTimeoutMs) throw new ConfigError('VISION_TIMEOUT_MS должен быть меньше EXTRACT_TIMEOUT_MS')
+  return {
+    url: url.replace(/\/+$/, ''),
+    apiKey,
+    model: (env.VISION_MODEL ?? '').trim() || 'vision',
+    timeoutMs,
+    maxTokens: int(env, 'VISION_MAX_TOKENS', 400, 16)
+  }
 }
 
 /** Минимальная длина общего ключа: короткий ключ перебирается. */
@@ -47,6 +75,8 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     if (!apiKey) throw new ConfigError('EXTRACT_API_KEY не задан: сервис без ключа не запускается')
     if (apiKey.length < MIN_API_KEY_LENGTH) throw new ConfigError(`EXTRACT_API_KEY короче ${MIN_API_KEY_LENGTH} знаков`)
   }
+  // 5 минут: OCR скана в 30 страниц по очереди на одном ядре укладывается с запасом.
+  const extractTimeoutMs = int(env, 'EXTRACT_TIMEOUT_MS', 300_000, 1)
   return {
     port: int(env, 'PORT', 3000, 1),
     // По умолчанию — только loopback: открыть сервис в сеть должно быть решением (в образе
@@ -58,10 +88,10 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     maxConcurrency: int(env, 'MAX_CONCURRENCY', 2, 1),
     maxQueue: int(env, 'MAX_QUEUE', 8, 0),
     queueTimeoutMs: int(env, 'QUEUE_TIMEOUT_MS', 60_000, 1),
-    // 5 минут: OCR скана в 30 страниц по очереди на одном ядре укладывается с запасом.
-    extractTimeoutMs: int(env, 'EXTRACT_TIMEOUT_MS', 300_000, 1),
+    extractTimeoutMs,
     redisUrl: env.REDIS_URL || null,
     cacheDir: env.CACHE_DIR || '/tmp/file-extract-cache',
-    cacheMaxBytes: int(env, 'CACHE_MAX_BYTES', 256 * 1024 * 1024, 1)
+    cacheMaxBytes: int(env, 'CACHE_MAX_BYTES', 256 * 1024 * 1024, 1),
+    vision: visionConfig(env, extractTimeoutMs)
   }
 }

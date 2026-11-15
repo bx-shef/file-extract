@@ -3,6 +3,7 @@ import { ConfigError, EXTRACTOR_VERSION, loadConfig } from './config.ts'
 import { liveExtractRunners } from './extractRunners.ts'
 import { stdoutLogger } from './log.ts'
 import { createApp } from './server.ts'
+import { createDescriber } from './vision.ts'
 
 const SWEEP_INTERVAL_MS = 3_600_000
 
@@ -34,7 +35,11 @@ async function main(): Promise<void> {
   sweep()
   setInterval(sweep, SWEEP_INTERVAL_MS).unref()
 
-  const server = createApp({ config, runners: liveExtractRunners, cache, log: stdoutLogger })
+  // Зрение — только когда задан VISION_URL; сбой описания — запись в журнал без текста и имён.
+  const runners = config.vision
+    ? { ...liveExtractRunners, describe: createDescriber(config.vision, fetch, (error) => stdoutLogger({ evt: 'vision_failed', error })) }
+    : liveExtractRunners
+  const server = createApp({ config, runners, cache, log: stdoutLogger })
   // Запрос живёт не дольше ожидания в очереди + разбора + запаса на приём тела и ответ.
   server.requestTimeout = config.extractTimeoutMs + config.queueTimeoutMs + 30_000
   server.listen(config.port, config.host, () => {

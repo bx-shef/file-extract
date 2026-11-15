@@ -92,6 +92,27 @@ describe('HTTP: POST /extract', () => {
     const { extract } = await start()
     expect(await (await extract('x', 'scan.png')).json()).toMatchObject({ ocr: true, pages: 3, kind: 'image' })
   })
+  it('картинка со зрением: description в ответе, описание — в начале text', async () => {
+    const runners = fakeRunners({ describe: vi.fn(async () => 'Снимок экрана CRM.') })
+    const vision = { url: 'http://vision:8080/v1', apiKey: 'k', model: 'vision', timeoutMs: 1000, maxTokens: 400 }
+    const { extract } = await start({ runners, config: { vision } })
+    const body = await (await extract('x', 'scan.png')).json() as any
+    expect(body).toMatchObject({ kind: 'image', description: 'Снимок экрана CRM.' })
+    expect(body.text.startsWith('Описание картинки: Снимок экрана CRM.')).toBe(true)
+  })
+  it('включили зрение — картинка не берётся из кеша без описания; PDF — берётся', async () => {
+    const cache = memCache()
+    const first = await start({ cache })
+    await first.extract('same', 'scan.png')
+    await first.extract('same-pdf', 'doc.pdf')
+    await new Promise(r => server!.close(r))
+    server = null
+    const runners = fakeRunners({ describe: vi.fn(async () => 'Описание.') })
+    const vision = { url: 'http://vision:8080/v1', apiKey: 'k', model: 'vision', timeoutMs: 1000, maxTokens: 400 }
+    const second = await start({ cache, runners, config: { vision } })
+    expect(await (await second.extract('same', 'scan.png')).json()).toMatchObject({ cached: false, description: 'Описание.' })
+    expect(await (await second.extract('same-pdf', 'doc.pdf')).json()).toMatchObject({ cached: true })
+  })
   it('401 без ключа и с неверным ключом; разбор не запускается', async () => {
     const runners = fakeRunners()
     const { extract } = await start({ runners })

@@ -6,6 +6,7 @@
 import { ExtractError } from './errors.ts'
 import { planExtraction, type ExtractKind } from './formats.ts'
 import { sanitizeExtractedText } from './textSanitize.ts'
+import { composeImageText, type DescribeFile } from './vision.ts'
 
 /**
  * Меньше стольких непробельных знаков — PDF считается сканом, и его разбирает OCR.
@@ -40,6 +41,8 @@ export interface ExtractRunners {
   ocr: (path: string, signal: AbortSignal) => Promise<OcrOutput>
   /** HTML → PDF или DOCX через LibreOffice Writer (сборка документов: КП помощника). */
   htmlConvert?: (path: string, to: ConvertTo, signal: AbortSignal) => Promise<Buffer>
+  /** Описание картинки сервисом зрения (VISION_URL); нет — картинка только с текстом OCR. */
+  describe?: DescribeFile
 }
 
 export type ConvertTo = 'pdf' | 'docx'
@@ -57,6 +60,8 @@ export interface ExtractResult {
   sheets: Sheet[]
   ocr: boolean
   pages?: number
+  /** Описание картинки сервисом зрения — только у картинок и только когда оно получено. */
+  description?: string
 }
 
 /**
@@ -87,7 +92,7 @@ function finishText(raw: ExtractResult): ExtractResult {
 }
 
 async function extractRaw(path: string, fileName: string, runners: ExtractRunners, signal: AbortSignal): Promise<ExtractResult> {
-  const { kind } = planExtraction(fileName)
+  const { kind, ext } = planExtraction(fileName)
   switch (kind) {
     case 'text':
       return { kind, text: await runners.readText(path, signal), sheets: [], ocr: false }
@@ -102,8 +107,14 @@ async function extractRaw(path: string, fileName: string, runners: ExtractRunner
       return { kind, text: o.text, sheets: o.sheets, ocr: false }
     }
     case 'image': {
-      const o = await runners.ocr(path, signal)
-      return withPages({ kind, text: o.text, sheets: [], ocr: true }, o.pages)
+      // OCR и зрение — параллельно: текст OCR готов за секунды, описание модели — за десятки секунд.
+      // Сбой зрения возвращает null (картинка остаётся с OCR); сбой OCR — ошибка разбора, как раньше.
+      const [o, description] = await Promise.all([
+        runners.ocr(path, signal),
+        runners.describe ? runners.describe(path, ext, signal) : Promise.resolve(null)
+      ])
+      const r: ExtractResult = { kind, text: composeImageText(description, o.text), sheets: [], ocr: true }
+      return withPages(description ? { ...r, description } : r, o.pages)
     }
     default:
       throw new ExtractError('unsupported', 'неподдерживаемый формат файла')

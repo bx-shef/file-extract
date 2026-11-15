@@ -24,6 +24,7 @@ docker build -t file-extract .
 | `src/formats.ts` | расширения и выбор способа разбора (`planExtraction`, `SUPPORTED_EXT`) |
 | `src/textExtract.ts` | маршрутизация разбора, `MIN_PDF_TEXT`, откат на OCR, единая точка очистки `finishText`; исполнители внедряются |
 | `src/extractRunners.ts` | живые исполнители: spawn с группой процессов (cwd/HOME/XDG — рабочий каталог), `subprocessEnv`, `isolatedHome`, профиль LibreOffice `LO_REGISTRY`, потолки `MAX_PDF_TEXT_PAGES`/`MAX_SHEET_CSV_BYTES`, `checkImagePixels`, `decodeBytes`, `officeConvertTarget`, `parseOfficeCsvSheets`/`parseOfficeCsvOutputs`, `countRows`, `MAX_SHEET_CSVS`, `MAX_OCR_PDF_PAGES`, `orderPdfPageImages`, `hasPdfMagic`; набор `liveExtractRunners` |
+| `src/vision.ts` | зрение: описание картинки сервисом toolsai-light `vision` (`createDescriber`, `VISION_MIME`, `composeImageText`, `visionCacheKey`, `VISION_PROMPT_VERSION`); сбой — null и `vision_failed` в журнал |
 | `src/imageSize.ts` | размеры картинки по заголовку (PNG/JPEG/TIFF/BMP), `MAX_IMAGE_PIXELS` |
 | `src/textSanitize.ts` | `sanitizeExtractedText`, порог читаемости `MIN_READABLE_CHARS` |
 | `src/server.ts` | HTTP `POST /v1/extract` (`EXTRACT_PATH`), `POST /v1/convert` (`CONVERT_PATH`, HTML → PDF/DOCX без кеша) и `GET /health` (версия разборщика): авторизация, лимит размера, место для тела, кеш, очередь, таймаут, уход клиента, временный каталог, коды ошибок |
@@ -49,6 +50,8 @@ docker build -t file-extract .
   (cwd/HOME/XDG), таймаут, убийство группы (и после обычного завершения).
 - **LibreOffice — без `--safe-mode`**: он отбрасывает профиль с `LO_REGISTRY` (проверено вживую).
 - **Новый вход, от которого зависит ответ, — в ключ кеша** (`CacheKeyInput`).
+- **Зрение — не сбой разбора** (toolsai-light#13): описание картинки — `data:`-адресом в сервис зрения, параллельно с OCR;
+  нет ответа — картинка с текстом OCR. Сменил запрос к модели — подними `VISION_PROMPT_VERSION` (он в ключе кеша).
 - **Тест краснеет при мутации кода**; откат мутации — из копии, не `git checkout --`.
 - Код и имена — по-английски; комментарии, документация, коммиты — по-русски.
 - Штамп `> Last reviewed: YYYY-MM-DD` под заголовком каждого `.md`.
