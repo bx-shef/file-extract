@@ -3,8 +3,9 @@
 // зрения не ходит (его исходящие запросы закрыты). Сбой зрения — не сбой разбора: картинка остаётся
 // с текстом OCR, а в журнал уходит только машинная причина.
 //
-// Зрение идёт параллельно с очередью и OCR, своим местом (Limiter на 1: сервис зрения разбирает одну
-// картинку за раз) — место разбора оно не держит: десятки секунд модели не задерживают чужие файлы.
+// Зрение начинается, когда картинка получила место разбора, идёт параллельно с OCR и своим местом (Limiter на 1:
+// сервис зрения разбирает одну картинку за раз) — место разбора оно не держит: десятки секунд модели не
+// задерживают чужие файлы.
 
 import { imageFormat, imageSize, MAX_IMAGE_PIXELS, type ImageFormat } from './imageSize.ts'
 import { Limiter } from './limiter.ts'
@@ -33,6 +34,12 @@ export const MAX_DESCRIPTION_CHARS = 2000
 
 /** Потолок ответа сервиса зрения в байтах: описание — сотни знаков; больше — не наш ответ, дальше не читаем. */
 export const MAX_RESPONSE_BYTES = 64 * 1024
+
+/**
+ * Очередь зрения: одна картинка в работе, ждут не больше двух и не дольше половины VISION_TIMEOUT_MS — та, что
+ * получила место, успевает ответить, а не работает впустую до таймаута. Лишние — сразу без описания (в кеш не идут).
+ */
+export const VISION_MAX_QUEUE = 2
 
 export interface VisionConfig {
   /** База OpenAI-совместимого API без завершающего «/»: http://vision:8080/v1. */
@@ -78,8 +85,11 @@ export function composeImageText(description: string | null, ocrText: string): s
   return `Описание картинки: ${description}\n\n${ocr ? `Текст с картинки:\n${ocr}` : 'Текста на картинке не найдено.'}`
 }
 
-/** Знаки направления текста (bidi) и BOM: в описании от модели они только прячут или переворачивают текст. */
-const BIDI_CHARS = /[؜‎‏‪-‮⁦-⁩﻿]/g
+/**
+ * Знаки направления текста (bidi) и BOM: в описании от модели они только прячут или переворачивают текст.
+ * ⚠ Escape-последовательностями намеренно (как в textSanitize.ts): литералы невидимы, правка «на глаз» ломает диапазон.
+ */
+const BIDI_CHARS = /[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/g
 
 /** Не длиннее max единиц UTF-16; суррогатная пара на границе не рвётся (иначе в конце «�»). Чистая. */
 export function cutText(s: string, max: number): string {
@@ -124,7 +134,10 @@ export function visionRequestBody(v: VisionConfig, mime: string, bytes: Uint8Arr
 /** Тело ответа целиком, но не больше max байт; больше — ошибка, остаток не читаем. */
 async function readCapped(res: Response, max: number): Promise<string> {
   const declared = Number(res.headers.get('content-length') ?? NaN)
-  if (Number.isFinite(declared) && declared > max) throw new Error('ответ больше потолка')
+  if (Number.isFinite(declared) && declared > max) {
+    void res.body?.cancel().catch(() => {})
+    throw new Error('ответ больше потолка')
+  }
   if (!res.body) return ''
   const reader = res.body.getReader()
   const parts: Uint8Array[] = []
@@ -144,7 +157,7 @@ async function readCapped(res: Response, max: number): Promise<string> {
 
 export interface DescriberDeps {
   fetchFn?: typeof fetch
-  /** Очередь зрения: сервис разбирает одну картинку за раз (PARALLEL=1) — лишние ждут здесь, а не в его очереди. */
+  /** Очередь зрения (по умолчанию — VISION_MAX_QUEUE): сервис разбирает одну картинку за раз (PARALLEL=1). */
   limiter?: Limiter
   onFail?: (reason: VisionFailure) => void
 }
@@ -153,14 +166,15 @@ export interface DescriberDeps {
  * Описатель картинок. До запроса — проверки по байтам: формат из VISION_FORMATS и не больше
  * MAX_IMAGE_PIXELS (как у OCR); иначе отказ без запроса. Таймаут (VISION_TIMEOUT_MS) — на очередь
  * зрения и ответ вместе. Перенаправления запрещены: ключ не уходит на чужой адрес. Ответ — не больше
- * MAX_RESPONSE_BYTES. Не бросает: любой сбой — `{ failure }` и вызов onFail.
+ * MAX_RESPONSE_BYTES. Не бросает: любой сбой — `{ failure }`; onFail — только настоящие сбои зрения
+ * (формат, размер и уход клиента — обычное дело, не тревога).
  */
 export function createDescriber(v: VisionConfig, deps: DescriberDeps = {}): DescribeImage {
   const fetchFn = deps.fetchFn ?? fetch
-  const limiter = deps.limiter ?? new Limiter(1, v.timeoutMs)
+  const limiter = deps.limiter ?? new Limiter(1, Math.floor(v.timeoutMs / 2), VISION_MAX_QUEUE)
   const onFail = deps.onFail ?? (() => {})
   const fail = (failure: VisionFailure): VisionOutcome => {
-    onFail(failure)
+    if (failure !== 'unsupported' && failure !== 'too_large' && failure !== 'aborted') onFail(failure)
     return { failure }
   }
   return async (bytes, signal) => {

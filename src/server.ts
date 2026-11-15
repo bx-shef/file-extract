@@ -13,7 +13,7 @@ import { errorClassOf, shortSha, type LogEntry, type Logger } from './log.ts'
 import { checkHtml } from './htmlGuard.ts'
 import { convertTarget, extractText, type ExtractResult, type ExtractRunners, type Sheet } from './textExtract.ts'
 import { applyTextLimit } from './truncate.ts'
-import { composeImageText, visionCacheable, visionCacheKey, type DescribeImage } from './vision.ts'
+import { composeImageText, visionCacheable, visionCacheKey, type DescribeImage, type VisionOutcome } from './vision.ts'
 
 export interface ExtractResponse {
   text: string
@@ -151,8 +151,9 @@ export function createApp(deps: AppDeps): Server {
   /**
    * Разбор в месте очереди: ждём место, пишем тело во временный каталог, зовём программы разбора с
    * таймаутом. Место отдаём сразу после разбора — зрение (оно у картинки идёт параллельно) его не ждёт.
+   * onSlot — сразу после получения места: так зрение не начинается у запроса, которому места не дали.
    */
-  async function extractInSlot(body: Buffer, fileName: string, ext: string, signal: AbortSignal, ctx: Ctx): Promise<ExtractResult> {
+  async function extractInSlot(body: Buffer, fileName: string, ext: string, signal: AbortSignal, ctx: Ctx, onSlot?: () => void): Promise<ExtractResult> {
     const waitStart = now()
     let release: () => void
     try {
@@ -164,6 +165,7 @@ export function createApp(deps: AppDeps): Server {
     } finally {
       ctx.queueMs = now() - waitStart
     }
+    onSlot?.()
     // место в очереди отдаём в finally — и если не создался даже временный каталог
     let dir: string | undefined
     const ac = new AbortController()
@@ -203,6 +205,12 @@ export function createApp(deps: AppDeps): Server {
     }
     if (inflight >= maxInflight) throw new HttpError(503, 'busy', 'сервис занят, повторите позже')
     inflight++
+    // Тело в памяти считаем, пока его читают, ждут место или разбирают. Картинку, ждущую только зрения, — уже нет:
+    // таких держит очередь зрения (VISION_MAX_QUEUE), а свободное место разбора не должно отвечать 503.
+    let holding = true
+    const letGo = (): void => {
+      if (holding) { holding = false; inflight-- }
+    }
     try {
       const body = await readBody(req, config.maxFileBytes)
       ctx.bytes = body.length
@@ -216,23 +224,26 @@ export function createApp(deps: AppDeps): Server {
       const parsed = hit ? safeParse(hit) : null
       if (parsed) return { ...parsed, cached: true }
 
-      // Зрение — сразу, параллельно с очередью и OCR, своим местом: место разбора оно не держит.
-      // Конец запроса (ответ, ошибка, уход клиента) — отмена зрения.
+      // Зрение — с получением места разбора (не дали места — зрение не начинается), параллельно с OCR и своим
+      // местом: место разбора оно не держит. Конец запроса (ответ, ошибка, уход клиента) — отмена зрения.
       const visionAc = new AbortController()
       const stopVision = (): void => visionAc.abort()
       signal.addEventListener('abort', stopVision, { once: true })
-      const visionP = plan.kind === 'image' && describe ? describe(body, visionAc.signal) : null
+      const seen: { p: Promise<VisionOutcome> | null } = { p: null }
+      const startVision = plan.kind === 'image' && describe ? (): void => { seen.p = describe(body, visionAc.signal) } : undefined
       try {
         let r: ExtractResult
         try {
-          r = await extractInSlot(body, fileName, plan.ext, signal, ctx)
+          r = await extractInSlot(body, fileName, plan.ext, signal, ctx, startVision)
         } catch (e) {
           // Картинка без читаемого текста: зрение ещё может её описать — ждём его, а не отказываем сразу
-          if (!(visionP && e instanceof ExtractError && e.code === 'unreadable')) throw e
-          if (!('description' in await visionP)) throw e
+          if (!(seen.p && e instanceof ExtractError && e.code === 'unreadable')) throw e
+          letGo()
+          if (!('description' in await seen.p)) throw e
           r = { kind: 'image', text: '', sheets: [], ocr: true }
         }
-        const outcome = visionP ? await visionP : null
+        letGo()
+        const outcome = seen.p ? await seen.p : null
         const description = outcome && 'description' in outcome ? outcome.description : undefined
         const lim = applyTextLimit(description ? composeImageText(description, r.text) : r.text, r.sheets, config.maxTextChars)
         const out: Omit<ExtractResponse, 'cached'> = {
@@ -255,7 +266,7 @@ export function createApp(deps: AppDeps): Server {
         signal.removeEventListener('abort', stopVision)
       }
     } finally {
-      inflight--
+      letGo()
     }
   }
 

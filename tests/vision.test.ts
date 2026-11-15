@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { Limiter } from '../src/limiter.ts'
 import {
   composeImageText, createDescriber, cutText, MAX_DESCRIPTION_CHARS, MAX_RESPONSE_BYTES, parseDescription, VISION_FORMATS,
-  VISION_PROMPT, VISION_PROMPT_VERSION, visionCacheable, visionCacheKey, visionRequestBody, type VisionConfig
+  VISION_MAX_QUEUE, VISION_PROMPT, VISION_PROMPT_VERSION, visionCacheable, visionCacheKey, visionRequestBody, type VisionConfig
 } from '../src/vision.ts'
 import { gifHeader, pngHeader } from './imageFixtures.ts'
 
@@ -57,8 +57,8 @@ describe('VISION_FORMATS и запрос', () => {
   it('ровно PNG, JPEG, WEBP — с их MIME', () => {
     expect(VISION_FORMATS).toEqual({ png: 'image/png', jpeg: 'image/jpeg', webp: 'image/webp' })
   })
-  it('текст запроса привязан к версии: сменил VISION_PROMPT — подними VISION_PROMPT_VERSION (она в ключе кеша) и обнови хеш', () => {
-    expect([VISION_PROMPT_VERSION, createHash('sha256').update(VISION_PROMPT).digest('hex').slice(0, 16)]).toEqual(['v1', '7e4e8473f8840cd2'])
+  it('запрос привязан к версии: сменил VISION_PROMPT или выборку (temperature, top_p…) — подними VISION_PROMPT_VERSION (она в ключе кеша) и обнови хеш', () => {
+    expect([VISION_PROMPT_VERSION, createHash('sha256').update(visionRequestBody(V, 'image/png', Buffer.alloc(0))).digest('hex').slice(0, 16)]).toEqual(['v1', 'd9b415532ed1f7f4'])
   })
 })
 
@@ -115,7 +115,7 @@ describe('createDescriber', () => {
     for (const b of [gifHeader(10, 10), bmp, Buffer.from('не картинка'), png.subarray(0, 12)]) expect(await d(b, signal())).toEqual({ failure: 'unsupported' })
     expect(await d(pngHeader(10_000, 10_000), signal())).toEqual({ failure: 'too_large' })
     expect(fetchFn).not.toHaveBeenCalled()
-    expect(onFail).toHaveBeenLastCalledWith('too_large')
+    expect(onFail).not.toHaveBeenCalled() // формат и размер — не тревога для журнала
   })
   it('разбор уже отменён — aborted без запроса', async () => {
     const fetchFn = vi.fn()
@@ -161,11 +161,21 @@ describe('createDescriber', () => {
     const p = createDescriber(V, { fetchFn: hang, onFail })(png, outer.signal)
     outer.abort()
     expect(await p).toEqual({ failure: 'aborted' })
-    expect(onFail).toHaveBeenCalledWith('aborted')
+    expect(onFail).not.toHaveBeenCalled() // уход клиента — не сбой зрения
   })
   it('сеть недоступна — network', async () => {
     const d = createDescriber(V, { fetchFn: fetchOf(async () => { throw new TypeError('fetch failed') }) })
     expect(await d(png, signal())).toEqual({ failure: 'network' })
+  })
+  it('очередь по умолчанию: одна картинка в работе, две ждут, четвёртая — сразу busy без запроса', async () => {
+    const outer = new AbortController()
+    const fetchFn = vi.fn(hang)
+    const d = createDescriber({ ...V, timeoutMs: 5000 }, { fetchFn: fetchFn as unknown as typeof fetch })
+    const ps = [1, 2, 3, 4].map(() => d(png, outer.signal))
+    expect([VISION_MAX_QUEUE, await ps[3]]).toEqual([2, { failure: 'busy' }])
+    outer.abort()
+    expect(await Promise.all(ps.slice(0, 3))).toEqual(Array(3).fill({ failure: 'aborted' }))
+    expect(fetchFn).toHaveBeenCalledTimes(1)
   })
   it('место в очереди зрения отдаётся и после сбоя: следующая картинка идёт сразу', async () => {
     const limiter = new Limiter(1, 30)
