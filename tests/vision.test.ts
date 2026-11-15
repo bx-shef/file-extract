@@ -1,11 +1,11 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createHash } from 'node:crypto'
+import { describe, expect, it, vi } from 'vitest'
+import { Limiter } from '../src/limiter.ts'
 import {
-  composeImageText, createDescriber, MAX_DESCRIPTION_CHARS, parseDescription, VISION_MIME, VISION_PROMPT,
-  VISION_PROMPT_VERSION, visionCacheKey, visionRequestBody, type VisionConfig
+  composeImageText, createDescriber, cutText, MAX_DESCRIPTION_CHARS, MAX_RESPONSE_BYTES, parseDescription, VISION_FORMATS,
+  VISION_PROMPT, VISION_PROMPT_VERSION, visionCacheable, visionCacheKey, visionRequestBody, type VisionConfig
 } from '../src/vision.ts'
+import { gifHeader, pngHeader } from './imageFixtures.ts'
 
 const V: VisionConfig = { url: 'http://vision:8080/v1', apiKey: 'vision-key-0123456789', model: 'vision', timeoutMs: 2000, maxTokens: 400 }
 
@@ -39,6 +39,34 @@ describe('parseDescription', () => {
   it('длинное режется по MAX_DESCRIPTION_CHARS', () => {
     expect(parseDescription({ choices: [{ message: { content: 'я'.repeat(MAX_DESCRIPTION_CHARS + 50) } }] })).toHaveLength(MAX_DESCRIPTION_CHARS)
   })
+  it('без управляющих символов C0/C1 и знаков направления текста (ревью #30)', () => {
+    const content = 'Счёт\u0000 №5\u202E лицевой\u2066 счёт\u200F\u0085 на\uFEFF 100 BYN'
+    expect(parseDescription({ choices: [{ message: { content } }] })).toBe('Счёт №5 лицевой счёт на 100 BYN')
+  })
+})
+
+describe('cutText', () => {
+  it('эмодзи на границе не рвётся: без половины суррогатной пары', () => {
+    expect(cutText('ab😀', 3)).toBe('ab')
+    expect(cutText('ab😀', 4)).toBe('ab😀')
+    expect(cutText('abc', 2)).toBe('ab')
+  })
+})
+
+describe('VISION_FORMATS и запрос', () => {
+  it('ровно PNG, JPEG, WEBP — с их MIME', () => {
+    expect(VISION_FORMATS).toEqual({ png: 'image/png', jpeg: 'image/jpeg', webp: 'image/webp' })
+  })
+  it('текст запроса привязан к версии: сменил VISION_PROMPT — подними VISION_PROMPT_VERSION (она в ключе кеша) и обнови хеш', () => {
+    expect([VISION_PROMPT_VERSION, createHash('sha256').update(VISION_PROMPT).digest('hex').slice(0, 16)]).toEqual(['v1', '7e4e8473f8840cd2'])
+  })
+})
+
+describe('visionCacheable', () => {
+  it('описание, без зрения, отказ по формату и размеру — в кеш; таймаут, сеть, занято, пусто — нет', () => {
+    expect([null, { description: 'x' }, { failure: 'unsupported' }, { failure: 'too_large' }].map(o => visionCacheable(o as never))).toEqual([true, true, true, true])
+    expect(['timeout', 'aborted', 'network', 'busy', 'empty', 'bad_response', 'http_503'].map(f => visionCacheable({ failure: f } as never))).toEqual(Array(7).fill(false))
+  })
 })
 
 describe('visionCacheKey', () => {
@@ -60,75 +88,89 @@ describe('visionRequestBody', () => {
 })
 
 describe('createDescriber', () => {
-  let dir: string
-  let png: string
-  beforeEach(async () => {
-    dir = await mkdtemp(join(tmpdir(), 'vision-test-'))
-    png = join(dir, 'input.png')
-    await writeFile(png, Buffer.from('PNGBYTES'))
-  })
-  afterEach(async () => { await rm(dir, { recursive: true, force: true }) })
+  const png = pngHeader(10, 10)
+  const signal = (): AbortSignal => new AbortController().signal
+  /** Как настоящий fetch: уже отменённый сигнал — отказ сразу, иначе — по событию abort. */
+  const hang = (async (_u: string, init: RequestInit) => new Promise((_, reject) => {
+    if (init.signal!.aborted) reject(new Error('aborted'))
+    init.signal!.addEventListener('abort', () => reject(new Error('aborted')))
+  })) as unknown as typeof fetch
+  const fetchOf = (f: (...a: never[]) => unknown): typeof fetch => f as unknown as typeof fetch
 
   it('POST на /chat/completions с ключом, без перенаправлений; ответ — описание', async () => {
     const fetchFn = vi.fn(async () => okResponse('Снимок экрана CRM.'))
-    const d = createDescriber(V, fetchFn as unknown as typeof fetch)
-    expect(await d(png, 'png', new AbortController().signal)).toBe('Снимок экрана CRM.')
+    const d = createDescriber(V, { fetchFn: fetchOf(fetchFn) })
+    expect(await d(png, signal())).toEqual({ description: 'Снимок экрана CRM.' })
     const [url, init] = fetchFn.mock.calls[0] as unknown as [string, RequestInit]
     expect(url).toBe('http://vision:8080/v1/chat/completions')
     expect(init).toMatchObject({ method: 'POST', redirect: 'error' })
     expect((init.headers as Record<string, string>).Authorization).toBe(`Bearer ${V.apiKey}`)
-    expect(JSON.parse(init.body as string).messages[0].content[0].image_url.url).toBe(`data:image/png;base64,${Buffer.from('PNGBYTES').toString('base64')}`)
+    expect(JSON.parse(init.body as string).messages[0].content[0].image_url.url).toBe(`data:image/png;base64,${png.toString('base64')}`)
   })
-  it('формат не из VISION_MIME (tiff, bmp) — null без запроса', async () => {
+  it('формат по байтам: GIF, BMP и мусор под именем .png — unsupported без запроса; больше 50 Мпикс — too_large без запроса', async () => {
     const fetchFn = vi.fn()
-    const d = createDescriber(V, fetchFn as unknown as typeof fetch)
-    for (const ext of ['tif', 'tiff', 'bmp']) expect(await d(png, ext, new AbortController().signal)).toBeNull()
-    expect(fetchFn).not.toHaveBeenCalled()
-    expect(Object.keys(VISION_MIME).sort()).toEqual(['jpeg', 'jpg', 'png', 'webp'])
-  })
-  it('HTTP-ошибка — null и причина http_<код>', async () => {
     const onFail = vi.fn()
-    const d = createDescriber(V, (async () => new Response('x', { status: 503 })) as unknown as typeof fetch, onFail)
-    expect(await d(png, 'png', new AbortController().signal)).toBeNull()
-    expect(onFail).toHaveBeenCalledWith('http_503')
+    const d = createDescriber(V, { fetchFn: fetchOf(fetchFn), onFail })
+    const bmp = Buffer.alloc(26); bmp.write('BM', 0, 'latin1'); bmp.writeUInt32LE(10, 18); bmp.writeInt32LE(10, 22)
+    for (const b of [gifHeader(10, 10), bmp, Buffer.from('не картинка'), png.subarray(0, 12)]) expect(await d(b, signal())).toEqual({ failure: 'unsupported' })
+    expect(await d(pngHeader(10_000, 10_000), signal())).toEqual({ failure: 'too_large' })
+    expect(fetchFn).not.toHaveBeenCalled()
+    expect(onFail).toHaveBeenLastCalledWith('too_large')
+  })
+  it('разбор уже отменён — aborted без запроса', async () => {
+    const fetchFn = vi.fn()
+    const ac = new AbortController(); ac.abort()
+    expect(await createDescriber(V, { fetchFn: fetchOf(fetchFn) })(png, ac.signal)).toEqual({ failure: 'aborted' })
+    expect(fetchFn).not.toHaveBeenCalled()
+  })
+  it('очередь зрения занята дольше её ожидания — busy без запроса', async () => {
+    const limiter = new Limiter(1, 30)
+    await limiter.acquire()
+    const fetchFn = vi.fn()
+    expect(await createDescriber(V, { fetchFn: fetchOf(fetchFn), limiter })(png, signal())).toEqual({ failure: 'busy' })
+    expect(fetchFn).not.toHaveBeenCalled()
+  })
+  it('HTTP-ошибка — http_<код>', async () => {
+    const d = createDescriber(V, { fetchFn: fetchOf(async () => new Response('x', { status: 503 })) })
+    expect(await d(png, signal())).toEqual({ failure: 'http_503' })
   })
   it('не JSON — bad_response; пустой ответ — empty', async () => {
-    const onFail = vi.fn()
-    const bad = createDescriber(V, (async () => new Response('not json', { status: 200 })) as unknown as typeof fetch, onFail)
-    expect(await bad(png, 'png', new AbortController().signal)).toBeNull()
-    expect(onFail).toHaveBeenLastCalledWith('bad_response')
-    const empty = createDescriber(V, (async () => okResponse('  ')) as unknown as typeof fetch, onFail)
-    expect(await empty(png, 'png', new AbortController().signal)).toBeNull()
-    expect(onFail).toHaveBeenLastCalledWith('empty')
+    expect(await createDescriber(V, { fetchFn: fetchOf(async () => new Response('not json', { status: 200 })) })(png, signal())).toEqual({ failure: 'bad_response' })
+    expect(await createDescriber(V, { fetchFn: fetchOf(async () => okResponse('  ')) })(png, signal())).toEqual({ failure: 'empty' })
   })
-  it('свой таймаут — null и timeout, а не зависание', async () => {
-    const onFail = vi.fn()
-    // Как настоящий fetch: уже отменённый сигнал — отказ сразу, иначе — по событию abort.
-    const hang = (async (_u: string, init: RequestInit) => new Promise((_, reject) => {
-      if (init.signal!.aborted) reject(new Error('aborted'))
-      init.signal!.addEventListener('abort', () => reject(new Error('aborted')))
-    })) as unknown as typeof fetch
-    const d = createDescriber({ ...V, timeoutMs: 30 }, hang, onFail)
-    expect(await d(png, 'png', new AbortController().signal)).toBeNull()
-    expect(onFail).toHaveBeenCalledWith('timeout')
+  it('ответ больше MAX_RESPONSE_BYTES — bad_response, дальше не читаем', async () => {
+    const big = JSON.stringify({ choices: [{ message: { content: 'я'.repeat(MAX_RESPONSE_BYTES) } }] })
+    expect(await createDescriber(V, { fetchFn: fetchOf(async () => new Response(big, { status: 200 })) })(png, signal())).toEqual({ failure: 'bad_response' })
+    const declared = new Response('{}', { status: 200, headers: { 'Content-Length': String(MAX_RESPONSE_BYTES + 1) } })
+    expect(await createDescriber(V, { fetchFn: fetchOf(async () => declared) })(png, signal())).toEqual({ failure: 'bad_response' })
   })
-  it('отмена разбора снаружи — null и aborted', async () => {
+  it('свой таймаут — timeout, а не зависание; и когда модель молчит посреди ответа', async () => {
+    expect(await createDescriber({ ...V, timeoutMs: 30 }, { fetchFn: hang })(png, signal())).toEqual({ failure: 'timeout' })
+    // Заголовки пришли, тело — нет: как у настоящего fetch, отмена рвёт поток тела
+    const stalled = fetchOf(async (_u: string, init: RequestInit) => new Response(new ReadableStream({
+      start(c) {
+        c.enqueue(new TextEncoder().encode('{"choi'))
+        init.signal!.addEventListener('abort', () => c.error(new Error('aborted')))
+      }
+    }), { status: 200 }))
+    expect(await createDescriber({ ...V, timeoutMs: 30 }, { fetchFn: stalled })(png, signal())).toEqual({ failure: 'timeout' })
+  })
+  it('отмена разбора снаружи — aborted', async () => {
     const onFail = vi.fn()
-    // Как настоящий fetch: уже отменённый сигнал — отказ сразу, иначе — по событию abort.
-    const hang = (async (_u: string, init: RequestInit) => new Promise((_, reject) => {
-      if (init.signal!.aborted) reject(new Error('aborted'))
-      init.signal!.addEventListener('abort', () => reject(new Error('aborted')))
-    })) as unknown as typeof fetch
     const outer = new AbortController()
-    const p = createDescriber(V, hang, onFail)(png, 'png', outer.signal)
+    const p = createDescriber(V, { fetchFn: hang, onFail })(png, outer.signal)
     outer.abort()
-    expect(await p).toBeNull()
+    expect(await p).toEqual({ failure: 'aborted' })
     expect(onFail).toHaveBeenCalledWith('aborted')
   })
-  it('сеть недоступна — null и network', async () => {
-    const onFail = vi.fn()
-    const d = createDescriber(V, (async () => { throw new TypeError('fetch failed') }) as unknown as typeof fetch, onFail)
-    expect(await d(png, 'png', new AbortController().signal)).toBeNull()
-    expect(onFail).toHaveBeenCalledWith('network')
+  it('сеть недоступна — network', async () => {
+    const d = createDescriber(V, { fetchFn: fetchOf(async () => { throw new TypeError('fetch failed') }) })
+    expect(await d(png, signal())).toEqual({ failure: 'network' })
+  })
+  it('место в очереди зрения отдаётся и после сбоя: следующая картинка идёт сразу', async () => {
+    const limiter = new Limiter(1, 30)
+    const failing = createDescriber(V, { fetchFn: fetchOf(async () => { throw new TypeError('fetch failed') }), limiter })
+    await failing(png, signal())
+    expect(limiter.running).toBe(0)
   })
 })

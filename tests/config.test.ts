@@ -29,7 +29,9 @@ describe('loadConfig', () => {
   })
   it('зрение: адрес без ключа и кривой адрес — ошибка запуска', () => {
     expect(() => loadConfig({ NODE_ENV: 'test', VISION_URL: 'http://vision:8080/v1' })).toThrow(/VISION_API_KEY/)
-    for (const url of ['vision:8080', 'ftp://vision/v1', 'http://', 'http://vi sion/v1', 'http://vision/v1?x=1']) {
+    // ревью #30: логин и пароль в адресе, пустой запрос и якорь, неверный порт — тоже отказ запуска
+    for (const url of ['vision:8080', 'ftp://vision/v1', 'http://', 'http://vi sion/v1', 'http://vision/v1?x=1', 'http://vision/v1?', 'http://vision/v1#x',
+      'http://user:pass@vision:8080/v1', 'http://user@vision/v1', 'http://vision:99999/v1', 'file:///etc/passwd']) {
       expect(() => loadConfig({ NODE_ENV: 'test', VISION_URL: url, VISION_API_KEY: 'k' })).toThrow(/VISION_URL/)
     }
   })

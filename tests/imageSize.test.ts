@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { imageSize, MAX_IMAGE_PIXELS } from '../src/imageSize.ts'
+import { imageFormat, imageSize, MAX_IMAGE_PIXELS } from '../src/imageSize.ts'
 
 function pngHead(w: number, h: number): Uint8Array {
   const b = Buffer.alloc(33)
@@ -35,6 +35,16 @@ function bmpHead(w: number, h: number): Uint8Array {
   return b
 }
 
+/** Заголовок WEBP: RIFF, WEBP и первый чанк — VP8 (с потерями), VP8L (без потерь) или VP8X (расширенный). */
+function webpHead(kind: 'VP8 ' | 'VP8L' | 'VP8X', w: number, h: number): Uint8Array {
+  const b = Buffer.alloc(30)
+  b.write('RIFF', 0, 'latin1'); b.writeUInt32LE(22, 4); b.write('WEBP', 8, 'latin1'); b.write(kind, 12, 'latin1'); b.writeUInt32LE(10, 16)
+  if (kind === 'VP8 ') { b[23] = 0x9d; b[24] = 0x01; b[25] = 0x2a; b.writeUInt16LE(w, 26); b.writeUInt16LE(h, 28) }
+  if (kind === 'VP8L') { b[20] = 0x2f; b.writeUInt32LE((((w - 1) & 0x3fff) | (((h - 1) & 0x3fff) << 14)) >>> 0, 21) }
+  if (kind === 'VP8X') { b.writeUIntLE(w - 1, 24, 3); b.writeUIntLE(h - 1, 27, 3) }
+  return b
+}
+
 describe('imageSize', () => {
   it('PNG', () => expect(imageSize(pngHead(100_000, 70_000))).toEqual({ width: 100_000, height: 70_000 }))
   it('JPEG: пропускает сегменты до SOF', () => expect(imageSize(jpegHead(4000, 3000))).toEqual({ width: 4000, height: 3000 }))
@@ -48,5 +58,22 @@ describe('imageSize', () => {
     expect(imageSize(pngHead(1, 1).subarray(0, 20))).toBeNull()
     expect(imageSize(Buffer.from([0xff, 0xd8, 0xff]))).toBeNull()
   })
+  it('WEBP (ревью file-extract#30): VP8, VP8L, VP8X — размеры до OCR и зрения', () => {
+    expect(imageSize(webpHead('VP8 ', 1920, 1080))).toEqual({ width: 1920, height: 1080 })
+    expect(imageSize(webpHead('VP8L', 16384, 16384))).toEqual({ width: 16384, height: 16384 })
+    expect(imageSize(webpHead('VP8X', 10_000, 10_000))).toEqual({ width: 10_000, height: 10_000 })
+    const broken = Buffer.from(webpHead('VP8 ', 10, 10)); broken[23] = 0
+    expect(imageSize(broken)).toBeNull()
+  })
   it('потолок — 50 Мпикс', () => expect(MAX_IMAGE_PIXELS).toBe(50_000_000))
+})
+
+describe('imageFormat', () => {
+  it('по сигнатуре, не по имени', () => {
+    expect([pngHead(1, 1), jpegHead(1, 1), webpHead('VP8 ', 1, 1), tiffHead(1, 1, true), tiffHead(1, 1, false), bmpHead(1, 1)].map(imageFormat))
+      .toEqual(['png', 'jpeg', 'webp', 'tiff', 'tiff', 'bmp'])
+  })
+  it('GIF, текст, пусто, обрезанная сигнатура — null', () => {
+    for (const b of [Buffer.from('GIF89a......'), Buffer.from('hello'), Buffer.alloc(0), Buffer.from([0x89, 0x50, 0x4e, 0x47])]) expect(imageFormat(b)).toBeNull()
+  })
 })

@@ -53,32 +53,6 @@ describe('extractText', () => {
   it('картинка → ocr, признак ocr и число страниц', async () => {
     const out = await extractText('/f.png', 'f.png', runners())
     expect(out).toMatchObject({ kind: 'image', ocr: true, pages: 2 })
-    expect(out).not.toHaveProperty('description')
-  })
-  it('картинка со зрением: описание сверху текста и отдельным полем; describe получает путь и расширение', async () => {
-    const describe = vi.fn(async () => 'Снимок счёта: 500 BYN, поставщик «Ромашка».')
-    const out = await extractText('/data/in.jpeg', 'Счёт.JPEG', runners({ describe }))
-    expect(out.description).toBe('Снимок счёта: 500 BYN, поставщик «Ромашка».')
-    expect(out.text).toBe('Описание картинки: Снимок счёта: 500 BYN, поставщик «Ромашка».\n\nТекст с картинки:\nOCR: скан счёта на 500 BYN')
-    expect(out).toMatchObject({ kind: 'image', ocr: true, pages: 2 })
-    expect(describe).toHaveBeenCalledWith('/data/in.jpeg', 'jpeg', expect.anything())
-  })
-  it('картинка: зрение не ответило — текст OCR как есть, поля description нет', async () => {
-    const out = await extractText('/f.png', 'f.png', runners({ describe: vi.fn(async () => null) }))
-    expect(out.text).toBe('OCR: скан счёта на 500 BYN')
-    expect(out).not.toHaveProperty('description')
-  })
-  it('фото без текста: со зрением — читаемо (описание), без зрения — unreadable, как раньше', async () => {
-    const ocr = vi.fn(async () => ({ text: '' }))
-    const withVision = await extractText('/f.png', 'f.png', runners({ ocr, describe: vi.fn(async () => 'Фото склада: стеллажи с коробками.') }))
-    expect(withVision.text).toContain('Текста на картинке не найдено.')
-    await expect(extractText('/f.png', 'f.png', runners({ ocr }))).rejects.toThrow(ExtractError)
-  })
-  it('зрение не трогает PDF-скан и офис', async () => {
-    const describe = vi.fn(async () => 'описание')
-    await extractText('/f.pdf', 'f.pdf', runners({ pdfToText: vi.fn(async () => ''), describe }))
-    await extractText('/f.xlsx', 'f.xlsx', runners({ describe }))
-    expect(describe).not.toHaveBeenCalled()
   })
   it('текстовый PDF → pdfToText, без OCR', async () => {
     const r = runners()

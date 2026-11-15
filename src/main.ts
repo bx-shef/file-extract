@@ -1,6 +1,7 @@
 import { diskCache, redisCache, type CacheStore } from './cache.ts'
 import { ConfigError, EXTRACTOR_VERSION, loadConfig } from './config.ts'
 import { liveExtractRunners } from './extractRunners.ts'
+import { Limiter } from './limiter.ts'
 import { stdoutLogger } from './log.ts'
 import { createApp } from './server.ts'
 import { createDescriber } from './vision.ts'
@@ -35,11 +36,15 @@ async function main(): Promise<void> {
   sweep()
   setInterval(sweep, SWEEP_INTERVAL_MS).unref()
 
-  // Зрение — только когда задан VISION_URL; сбой описания — запись в журнал без текста и имён.
-  const runners = config.vision
-    ? { ...liveExtractRunners, describe: createDescriber(config.vision, fetch, (error) => stdoutLogger({ evt: 'vision_failed', error })) }
-    : liveExtractRunners
-  const server = createApp({ config, runners, cache, log: stdoutLogger })
+  // Зрение — только когда задан VISION_URL. Своя очередь на одну картинку: сервис зрения разбирает по одной,
+  // лишние ждут здесь (не дольше VISION_TIMEOUT_MS, не больше MAX_QUEUE). Сбой — в журнал без текста и имён.
+  const describe = config.vision
+    ? createDescriber(config.vision, {
+      limiter: new Limiter(1, config.vision.timeoutMs, config.maxQueue),
+      onFail: (error) => stdoutLogger({ evt: 'vision_failed', error })
+    })
+    : null
+  const server = createApp({ config, runners: liveExtractRunners, cache, log: stdoutLogger, ...(describe ? { describe } : {}) })
   // Запрос живёт не дольше ожидания в очереди + разбора + запаса на приём тела и ответ.
   server.requestTimeout = config.extractTimeoutMs + config.queueTimeoutMs + 30_000
   server.listen(config.port, config.host, () => {

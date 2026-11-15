@@ -38,22 +38,41 @@ function int(env: Record<string, string | undefined>, name: string, def: number,
 }
 
 /**
+ * База API зрения из VISION_URL: http(s), хост, порт и путь — без логина и пароля в адресе (ключ —
+ * только VISION_API_KEY в заголовке), без запроса и якоря (к адресу дописывается /chat/completions).
+ * Неверный адрес — null. Чистая.
+ */
+export function visionBaseUrl(raw: string): string | null {
+  if (/[\s?#]/.test(raw)) return null
+  let u: URL
+  try {
+    u = new URL(raw)
+  } catch {
+    return null
+  }
+  if ((u.protocol !== 'http:' && u.protocol !== 'https:') || u.hostname === '' || u.username !== '' || u.password !== '') return null
+  return `${u.origin}${u.pathname}`.replace(/\/+$/, '')
+}
+
+/**
  * Зрение: VISION_URL — база OpenAI-совместимого API (http://vision:8080/v1). Пусто — зрения нет.
  * Адрес без ключа — ошибка запуска, а не тихое «без зрения»: администратор хотел зрение.
- * Таймаут зрения меньше таймаута разбора: иначе долгий ответ модели губил бы и текст OCR.
+ * Таймаут зрения меньше таймаута разбора: зрение идёт параллельно с очередью и OCR, и тогда
+ * худший случай запроса (очередь + разбор) из-за него не растёт.
  */
 function visionConfig(env: Record<string, string | undefined>, extractTimeoutMs: number): VisionConfig | null {
-  const url = (env.VISION_URL ?? '').trim()
-  if (url === '') return null
-  if (!/^https?:\/\/[^\s/?#]+(\/[^\s?#]*)?$/.test(url)) {
-    throw new ConfigError('VISION_URL: ожидается адрес http(s)://хост[:порт]/путь, например http://vision:8080/v1')
+  const raw = (env.VISION_URL ?? '').trim()
+  if (raw === '') return null
+  const url = visionBaseUrl(raw)
+  if (url === null) {
+    throw new ConfigError('VISION_URL: ожидается адрес http(s)://хост[:порт]/путь без логина, запроса и якоря, например http://vision:8080/v1')
   }
   const apiKey = env.VISION_API_KEY ?? ''
   if (apiKey === '') throw new ConfigError('VISION_API_KEY не задан: без ключа сервис зрения не ответит')
   const timeoutMs = int(env, 'VISION_TIMEOUT_MS', 150_000, 1)
   if (timeoutMs >= extractTimeoutMs) throw new ConfigError('VISION_TIMEOUT_MS должен быть меньше EXTRACT_TIMEOUT_MS')
   return {
-    url: url.replace(/\/+$/, ''),
+    url,
     apiKey,
     model: (env.VISION_MODEL ?? '').trim() || 'vision',
     timeoutMs,
