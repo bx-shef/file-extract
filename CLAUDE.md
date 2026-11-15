@@ -1,6 +1,6 @@
 # CLAUDE.md — file-extract
 
-> Last reviewed: 2026-11-14
+> Last reviewed: 2026-11-15
 
 Внутренний сервис разбора файлов: файл → текст и листы таблиц. Голый `node:http`, Node 22,
 TypeScript запускается через `node --experimental-strip-types` (сборки нет), тесты — vitest.
@@ -24,11 +24,12 @@ docker build -t file-extract .
 | `src/formats.ts` | расширения и выбор способа разбора (`planExtraction`, `SUPPORTED_EXT`) |
 | `src/textExtract.ts` | маршрутизация разбора, `MIN_PDF_TEXT`, откат на OCR, единая точка очистки `finishText`; исполнители внедряются |
 | `src/extractRunners.ts` | живые исполнители: spawn с группой процессов (cwd/HOME/XDG — рабочий каталог), `subprocessEnv`, `isolatedHome`, профиль LibreOffice `LO_REGISTRY`, потолки `MAX_PDF_TEXT_PAGES`/`MAX_SHEET_CSV_BYTES`, `checkImagePixels`, `decodeBytes`, `officeConvertTarget`, `parseOfficeCsvSheets`/`parseOfficeCsvOutputs`, `countRows`, `MAX_SHEET_CSVS`, `MAX_OCR_PDF_PAGES`, `orderPdfPageImages`, `hasPdfMagic`; набор `liveExtractRunners` |
-| `src/imageSize.ts` | размеры картинки по заголовку (PNG/JPEG/TIFF/BMP), `MAX_IMAGE_PIXELS` |
+| `src/vision.ts` | зрение: описание картинки сервисом toolsai-light `vision` — `createDescriber` (исход `{ description } \| { failure }`, своя очередь `Limiter(1)`, формат по байтам `VISION_FORMATS` и `MAX_IMAGE_PIXELS` до запроса, ответ не больше `MAX_RESPONSE_BYTES`), `parseDescription` (C0/C1 и bidi вон, `cutText`), `composeImageText`, `visionCacheKey`, `visionCacheable`, `VISION_PROMPT_VERSION`; сбой — `vision_failed` в журнал |
+| `src/imageSize.ts` | размеры картинки по заголовку (PNG/JPEG/TIFF/BMP/WEBP), формат по сигнатуре `imageFormat`, `MAX_IMAGE_PIXELS` |
 | `src/textSanitize.ts` | `sanitizeExtractedText`, порог читаемости `MIN_READABLE_CHARS` |
-| `src/server.ts` | HTTP `POST /v1/extract` (`EXTRACT_PATH`), `POST /v1/convert` (`CONVERT_PATH`, HTML → PDF/DOCX без кеша) и `GET /health` (версия разборщика): авторизация, лимит размера, место для тела, кеш, очередь, таймаут, уход клиента, временный каталог, коды ошибок |
+| `src/server.ts` | HTTP `POST /v1/extract` (`EXTRACT_PATH`), `POST /v1/convert` (`CONVERT_PATH`, HTML → PDF/DOCX без кеша) и `GET /health` (версия разборщика): авторизация, лимит размера, место для тела, кеш, очередь (`extractInSlot` — место отдаётся сразу после разбора), зрение у картинок параллельно, таймаут, уход клиента, временный каталог, коды ошибок |
 | `src/htmlGuard.ts` | проверка и пересборка HTML для `/v1/convert`: `checkHtml` (линейный сканер тегов с кавычками; `<style>` — сырой текст без «<»; `data:image` по сигнатуре PNG/JPEG/GIF и размерам, `MAX_IMAGE_PIXELS` на документ; `<a>` и `href` — текстом), `unsafeHtml`, `normalizeHtml`; тесты — `tests/htmlGuard.test.ts`, байты картинок — `tests/imageFixtures.ts` |
-| `src/cache.ts` | ключ кеша (версия, способ, расширение, потолок текста, sha), хранилища на диске (с потолком размера) и в Redis (порт `CacheStore`) |
+| `src/cache.ts` | ключ кеша (версия, способ, расширение, потолок текста, зрение у картинок, sha), хранилища на диске (с потолком размера) и в Redis (порт `CacheStore`) |
 | `src/limiter.ts`, `src/truncate.ts`, `src/auth.ts`, `src/config.ts`, `src/log.ts`, `src/errors.ts` | очередь, потолок текста, ключ, настройки (`loadConfig`, `CACHE_TTL_SEC`, `MIN_API_KEY_LENGTH`) и `EXTRACTOR_VERSION`, журнал, коды ошибок |
 | `src/main.ts` | запуск: настройки, выбор кеша, чистка раз в час |
 | `docs/dev/` | для разработчиков соседних сервисов: подключение, HTTP-контракт (`API.md`), системные требования |
@@ -49,6 +50,11 @@ docker build -t file-extract .
   (cwd/HOME/XDG), таймаут, убийство группы (и после обычного завершения).
 - **LibreOffice — без `--safe-mode`**: он отбрасывает профиль с `LO_REGISTRY` (проверено вживую).
 - **Новый вход, от которого зависит ответ, — в ключ кеша** (`CacheKeyInput`).
+- **Зрение — не сбой разбора** (toolsai-light#13): описание картинки — `data:`-адресом в сервис зрения; начинается с
+  получением места разбора (`onSlot` в `extractInSlot`), идёт параллельно с OCR и своим местом (`VISION_MAX_QUEUE`: одна в
+  работе, две ждут не дольше половины таймаута). Место разбора и место тела (`inflight`) картинка, ждущая только зрения,
+  не держит. Нет ответа — картинка с текстом OCR, и такой ответ не кешируется (`visionCacheable`); в журнал — только
+  настоящие сбои. Сменил запрос или выборку — подними `VISION_PROMPT_VERSION` (он в ключе кеша; тест сверяет хеш тела запроса).
 - **Тест краснеет при мутации кода**; откат мутации — из копии, не `git checkout --`.
 - Код и имена — по-английски; комментарии, документация, коммиты — по-русски.
 - Штамп `> Last reviewed: YYYY-MM-DD` под заголовком каждого `.md`.
@@ -98,7 +104,7 @@ Sonnet — механика (ветки, тексты, снимки, чек-ли
 
 У сервиса есть версия (решение владельца 2026-10-28), semver: `version` в `package.json` = верхний
 заголовок `## X.Y.Z — ГГГГ-ММ-ДД` в `CHANGELOG.md`; выпуск — тег `vX.Y.Z` и релиз GitHub. Выпущено:
-**0.2.1** (тег `v0.2.1`). `GET /health` отдаёт `version` = `EXTRACTOR_VERSION` (`0.2.0-1`) —
+**0.2.1** (тег `v0.2.1`). `GET /health` отдаёт `version` = `EXTRACTOR_VERSION` (`0.2.0-2`) —
 версия разборщика: версия продукта + номер правки логики разбора (ключ кеша).
 
 - Каждый PR — пункт в `CHANGELOG.md` под «Не выпущено» (сверху).

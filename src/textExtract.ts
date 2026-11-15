@@ -102,6 +102,7 @@ async function extractRaw(path: string, fileName: string, runners: ExtractRunner
       return { kind, text: o.text, sheets: o.sheets, ocr: false }
     }
     case 'image': {
+      // Только OCR. Описание зрением добавляет server.ts — параллельно и своим местом, не держа место разбора.
       const o = await runners.ocr(path, signal)
       return withPages({ kind, text: o.text, sheets: [], ocr: true }, o.pages)
     }

@@ -1,6 +1,6 @@
 # file-extract для разработчиков
 
-> Last reviewed: 2026-11-04
+> Last reviewed: 2026-11-15
 
 Сервис отдаёт соседям линейки одну операцию: файл → текст (а у таблиц — ещё листы CSV).
 Разбор живёт в одном месте, а не копиями в каждом продукте.
@@ -47,7 +47,7 @@
 ## Как проверить
 
 ```bash
-curl -s http://file-extract:3000/health    # {"ok":true,"version":"0.2.0-1"}
+curl -s http://file-extract:3000/health    # {"ok":true,"version":"0.2.0-2"}
 ```
 
 `version` здесь — `EXTRACTOR_VERSION` (версия разборщика, часть ключа кеша), версия продукта —

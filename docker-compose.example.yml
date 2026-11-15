@@ -20,6 +20,9 @@ services:
       # ⚠ НЕ подключайте общий Redis MCP-сервера: у него AOF на диск, noeviction и 64 МБ —
       # кеш с персональными данными записался бы на диск, а при заполнении выдавил бы токены
       # (noeviction — отказ записи им же). Свой Redis — только без тома и без AOF (см. ниже).
+      # Зрение (по желанию): контейнер `vision` toolsai-light — в сети `vision` ниже (README, «Зрение»).
+      VISION_URL: ${VISION_URL:-}
+      VISION_API_KEY: ${VISION_API_KEY:-}
     # Файловая система только для чтения; писать можно лишь в tmpfs. Оба — noexec,nosuid,nodev:
     # из разбираемого файла нечего и некуда запускать.
     read_only: true
@@ -39,6 +42,8 @@ services:
       - ALL
     networks:
       - extract
+      # только file-extract и контейнер зрения: соседи по `extract` к зрению не ходят
+      - vision
     # Пример: сервис-потребитель тоже подключается к сети `extract`.
 
   # Необязательно: СВОЙ Redis под кеш вместо tmpfs. Без тома и без AOF — данные не переживают
@@ -52,4 +57,7 @@ services:
 networks:
   extract:
     # internal: у сети нет выхода наружу — разбираемый файл не может ничего никуда отправить.
+    internal: true
+  vision:
+    # Зрение по желанию: контейнер `vision` toolsai-light подключается к ней как к внешней (README, «Зрение»).
     internal: true

@@ -11,6 +11,11 @@ const u16be = (b: Uint8Array, o: number): number => ((b[o] ?? 0) << 8) | (b[o + 
 const u16le = (b: Uint8Array, o: number): number => (b[o] ?? 0) | ((b[o + 1] ?? 0) << 8)
 const u32be = (b: Uint8Array, o: number): number => u16be(b, o) * 0x10000 + u16be(b, o + 2)
 const u32le = (b: Uint8Array, o: number): number => u16le(b, o) + u16le(b, o + 2) * 0x10000
+const u24le = (b: Uint8Array, o: number): number => u16le(b, o) + (b[o + 2] ?? 0) * 0x10000
+const ascii = (b: Uint8Array, o: number, s: string): boolean => {
+  for (let i = 0; i < s.length; i++) if (b[o + i] !== s.charCodeAt(i)) return false
+  return true
+}
 
 function png(b: Uint8Array): ImageSize | null {
   // Сигнатура 8 байт, затем чанк IHDR: длина(4) тип(4) ширина(4) высота(4).
@@ -69,10 +74,41 @@ function bmp(b: Uint8Array): ImageSize | null {
   return { width: u32le(b, 18), height: h > 0x7fffffff ? 0x100000000 - h : h }
 }
 
+function webp(b: Uint8Array): ImageSize | null {
+  // RIFF, размер, WEBP; первый чанк с 12-го байта, его данные — с 20-го
+  if (b.length < 30 || !ascii(b, 0, 'RIFF') || !ascii(b, 8, 'WEBP')) return null
+  if (ascii(b, 12, 'VP8 ')) {
+    // с потерями: 3 байта тега кадра, код начала 9d 01 2a, ширина и высота — по 14 бит
+    if (b[23] !== 0x9d || b[24] !== 0x01 || b[25] !== 0x2a) return null
+    return { width: u16le(b, 26) & 0x3fff, height: u16le(b, 28) & 0x3fff }
+  }
+  if (ascii(b, 12, 'VP8L')) {
+    // без потерь: подпись 2f, затем ширина-1 и высота-1 — по 14 бит
+    if (b[20] !== 0x2f) return null
+    const bits = u32le(b, 21)
+    return { width: (bits & 0x3fff) + 1, height: ((bits >>> 14) & 0x3fff) + 1 }
+  }
+  // расширенный: флаги и 3 байта запаса, затем ширина-1 и высота-1 холста — по 24 бита
+  if (ascii(b, 12, 'VP8X')) return { width: u24le(b, 24) + 1, height: u24le(b, 27) + 1 }
+  return null
+}
+
 /**
- * Размеры PNG, JPEG, TIFF (первая страница) или BMP по байтам файла. Не узнали формат —
- * `null`: решение оставляем программе OCR (WebP здесь не разбирается). Чистая.
+ * Размеры PNG, JPEG, TIFF (первая страница), BMP или WEBP по байтам файла. Не узнали формат —
+ * `null`: решение оставляем программе OCR. Чистая.
  */
 export function imageSize(b: Uint8Array): ImageSize | null {
-  return png(b) ?? jpeg(b) ?? tiff(b) ?? bmp(b)
+  return png(b) ?? jpeg(b) ?? tiff(b) ?? bmp(b) ?? webp(b)
+}
+
+export type ImageFormat = 'png' | 'jpeg' | 'tiff' | 'bmp' | 'webp'
+
+/** Формат картинки по сигнатуре (первые байты), без разбора заголовка; не картинка — null. Чистая. */
+export function imageFormat(b: Uint8Array): ImageFormat | null {
+  if (b[0] === 0x89 && ascii(b, 1, 'PNG\r\n\x1a\n')) return 'png'
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'jpeg'
+  if (ascii(b, 0, 'RIFF') && ascii(b, 8, 'WEBP')) return 'webp'
+  if ((ascii(b, 0, 'II') && b[2] === 42 && b[3] === 0) || (ascii(b, 0, 'MM') && b[2] === 0 && b[3] === 42)) return 'tiff'
+  if (ascii(b, 0, 'BM')) return 'bmp'
+  return null
 }

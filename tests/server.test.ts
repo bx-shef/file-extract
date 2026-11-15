@@ -10,6 +10,7 @@ import { ExtractError } from '../src/errors.ts'
 import type { LogEntry } from '../src/log.ts'
 import { createApp } from '../src/server.ts'
 import type { ExtractRunners } from '../src/textExtract.ts'
+import type { DescribeImage, VisionOutcome } from '../src/vision.ts'
 import { dataUrl, pngHeader } from './imageFixtures.ts'
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -44,10 +45,10 @@ afterEach(async () => {
   server = null
 })
 
-async function start(opts: { runners?: ExtractRunners, cache?: CacheStore, config?: Partial<Config>, logs?: LogEntry[] } = {}) {
+async function start(opts: { runners?: ExtractRunners, cache?: CacheStore, config?: Partial<Config>, logs?: LogEntry[], describe?: DescribeImage } = {}) {
   const config = { ...loadConfig({ NODE_ENV: 'test', EXTRACT_API_KEY: KEY }), ...opts.config }
   const logs = opts.logs ?? []
-  server = createApp({ config, runners: opts.runners ?? fakeRunners(), cache: opts.cache ?? memCache(), log: e => logs.push(e) })
+  server = createApp({ config, runners: opts.runners ?? fakeRunners(), cache: opts.cache ?? memCache(), log: e => logs.push(e), ...(opts.describe ? { describe: opts.describe } : {}) })
   await new Promise<void>(r => server!.listen(0, '127.0.0.1', r))
   const { port } = server.address() as AddressInfo
   const base = `http://127.0.0.1:${port}`
@@ -91,6 +92,126 @@ describe('HTTP: POST /extract', () => {
   it('скан — ocr и pages', async () => {
     const { extract } = await start()
     expect(await (await extract('x', 'scan.png')).json()).toMatchObject({ ocr: true, pages: 3, kind: 'image' })
+  })
+  const VISION = { url: 'http://vision:8080/v1', apiKey: 'k', model: 'vision', timeoutMs: 1000, maxTokens: 400 }
+  const outcome = (o: VisionOutcome) => vi.fn(async (_b: Uint8Array, _s: AbortSignal) => o)
+  it('картинка со зрением: description в ответе, описание — в начале text, OCR — под ним', async () => {
+    const see = outcome({ description: 'Снимок экрана CRM.' })
+    const { extract } = await start({ describe: see, config: { vision: VISION } })
+    const body = await (await extract('x', 'scan.png')).json() as any
+    expect(body).toMatchObject({ kind: 'image', description: 'Снимок экрана CRM.', text: 'Описание картинки: Снимок экрана CRM.\n\nТекст с картинки:\nраспознанный текст скана' })
+    expect(Buffer.from(see.mock.calls[0]![0]).toString()).toBe('x')
+  })
+  it('зрение только у картинок: PDF и TXT его не зовут', async () => {
+    const see = outcome({ description: 'x' })
+    const { extract } = await start({ describe: see, config: { vision: VISION } })
+    await extract('x', 'doc.pdf')
+    await extract('x', 'a.txt')
+    expect(see).not.toHaveBeenCalled()
+  })
+  it('зрение не держит место разбора (ревью #30): пока модель думает, следующий файл разбирается', async () => {
+    let finish: (o: VisionOutcome) => void = () => {}
+    const see = vi.fn(() => new Promise<VisionOutcome>(r => { finish = r }))
+    const { extract } = await start({ describe: see, config: { vision: VISION, maxConcurrency: 1, queueTimeoutMs: 300 } })
+    const shot = extract('x', 'shot.png')
+    await vi.waitFor(() => expect(see).toHaveBeenCalled())
+    const next = await extract('y', 'a.txt')
+    expect(next.status).toBe(200)
+    finish({ description: 'Снимок.' })
+    expect(await (await shot).json()).toMatchObject({ description: 'Снимок.' })
+  })
+  it('зрение начинается вместе с OCR, а не после него', async () => {
+    let ocrDone: () => void = () => {}
+    const runners = fakeRunners({ ocr: vi.fn(() => new Promise<{ text: string, pages?: number }>(r => { ocrDone = () => r({ text: 'распознанный текст скана', pages: 1 }) })) })
+    const see = outcome({ description: 'Снимок.' })
+    const { extract } = await start({ runners, describe: see, config: { vision: VISION } })
+    const p = extract('x', 'shot.png')
+    await vi.waitFor(() => expect(runners.ocr).toHaveBeenCalled())
+    expect(see).toHaveBeenCalled()
+    ocrDone()
+    expect(await (await p).json()).toMatchObject({ description: 'Снимок.' })
+  })
+  it('места разбора не дали (503) — зрение не начиналось (ревью #30)', async () => {
+    let release: () => void = () => {}
+    const runners = fakeRunners({ readText: vi.fn(() => new Promise<string>(r => { release = () => r('Счёт №5 от ООО «Ромашка», сумма 100') })) })
+    const see = outcome({ description: 'x' })
+    const { extract } = await start({ runners, describe: see, config: { vision: VISION, maxConcurrency: 1, queueTimeoutMs: 100 } })
+    const slow = extract('x', 'a.txt')
+    await vi.waitFor(() => expect(runners.readText).toHaveBeenCalled())
+    expect((await extract('img', 'shot.png')).status).toBe(503)
+    expect(see).not.toHaveBeenCalled()
+    release()
+    expect((await slow).status).toBe(200)
+  })
+  it('картинка, которой осталось только зрение, не держит место тела: следующий файл — 200, а не 503 (ревью #30)', async () => {
+    let finish: (o: VisionOutcome) => void = () => {}
+    const see = vi.fn(() => new Promise<VisionOutcome>(r => { finish = r }))
+    const { extract } = await start({ describe: see, config: { vision: VISION, maxConcurrency: 1, maxQueue: 0 } })
+    const shot = extract('x', 'shot.png')
+    await vi.waitFor(() => expect(see).toHaveBeenCalled())
+    await vi.waitFor(async () => expect((await extract('y', 'a.txt')).status).toBe(200))
+    finish({ description: 'Снимок.' })
+    expect(await (await shot).json()).toMatchObject({ description: 'Снимок.' })
+  })
+  it('разбор упал — зрение отменяется', async () => {
+    const got: { s?: AbortSignal } = {}
+    const see = vi.fn((_b: Uint8Array, s: AbortSignal) => {
+      got.s = s
+      return new Promise<VisionOutcome>(r => s.addEventListener('abort', () => r({ failure: 'aborted' })))
+    })
+    const runners = fakeRunners({ ocr: vi.fn(async () => { throw new ExtractError('failed', 'программа OCR упала') }) })
+    const { extract } = await start({ runners, describe: see, config: { vision: VISION } })
+    expect((await extract('x', 'shot.png')).status).toBe(422)
+    expect(got.s?.aborted).toBe(true)
+  })
+  it('зрение не ответило (таймаут) — картинка с текстом OCR, но не в кеш: следующий запрос снова спросит зрение', async () => {
+    const cache = memCache()
+    const see = vi.fn(async (_b: Uint8Array, _s: AbortSignal): Promise<VisionOutcome> => ({ failure: 'timeout' }))
+    const { extract } = await start({ cache, describe: see, config: { vision: VISION } })
+    const first = await (await extract('same', 'scan.png')).json() as any
+    expect(first).toMatchObject({ cached: false, text: 'распознанный текст скана' })
+    expect(first.description).toBeUndefined()
+    expect(cache.map.size).toBe(0)
+    see.mockResolvedValueOnce({ description: 'Снимок.' })
+    expect(await (await extract('same', 'scan.png')).json()).toMatchObject({ cached: false, description: 'Снимок.' })
+    expect(await (await extract('same', 'scan.png')).json()).toMatchObject({ cached: true, description: 'Снимок.' })
+    expect(see).toHaveBeenCalledTimes(2)
+  })
+  it('на картинке нет текста, зрение описало — 200: описание и «Текста на картинке не найдено.»', async () => {
+    const runners = fakeRunners({ ocr: vi.fn(async () => ({ text: ' \n ', pages: 1 })) })
+    const { extract } = await start({ runners, describe: outcome({ description: 'Фото склада.' }), config: { vision: VISION } })
+    const r = await extract('x', 'photo.jpg')
+    expect(r.status).toBe(200)
+    expect(await r.json()).toMatchObject({ description: 'Фото склада.', text: 'Описание картинки: Фото склада.\n\nТекста на картинке не найдено.' })
+  })
+  it('нет текста, зрение временно не ответило — 503 busy (повторить), а не «нет текста»; пустой ответ модели — 422 unreadable', async () => {
+    const runners = fakeRunners({ ocr: vi.fn(async () => ({ text: ' ', pages: 1 })) })
+    const { extract } = await start({ runners, describe: outcome({ failure: 'busy' }), config: { vision: VISION } })
+    const busy = await extract('x', 'photo.jpg')
+    expect([busy.status, ((await busy.json()) as any).error]).toEqual([503, 'busy'])
+    await new Promise(r => server!.close(r))
+    server = null
+    const second = await start({ runners, describe: outcome({ failure: 'empty' }), config: { vision: VISION } })
+    const r = await second.extract('x', 'photo.jpg')
+    expect([r.status, ((await r.json()) as any).error]).toEqual([422, 'unreadable'])
+  })
+  it('описатель бросил синхронно — картинка с текстом OCR, место разбора не потеряно', async () => {
+    const see = vi.fn((): Promise<VisionOutcome> => { throw new Error('сбой описателя') })
+    const { extract } = await start({ describe: see, config: { vision: VISION, maxConcurrency: 1, queueTimeoutMs: 300 } })
+    const r = await extract('x', 'shot.png')
+    expect(await r.json()).toMatchObject({ text: 'распознанный текст скана', cached: false })
+    expect((await extract('y', 'a.txt')).status).toBe(200)
+  })
+  it('включили зрение — картинка не берётся из кеша без описания; PDF — берётся', async () => {
+    const cache = memCache()
+    const first = await start({ cache })
+    await first.extract('same', 'scan.png')
+    await first.extract('same-pdf', 'doc.pdf')
+    await new Promise(r => server!.close(r))
+    server = null
+    const second = await start({ cache, describe: outcome({ description: 'Описание.' }), config: { vision: VISION } })
+    expect(await (await second.extract('same', 'scan.png')).json()).toMatchObject({ cached: false, description: 'Описание.' })
+    expect(await (await second.extract('same-pdf', 'doc.pdf')).json()).toMatchObject({ cached: true })
   })
   it('401 без ключа и с неверным ключом; разбор не запускается', async () => {
     const runners = fakeRunners()

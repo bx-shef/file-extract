@@ -11,8 +11,9 @@ import { planExtraction } from './formats.ts'
 import { Limiter, QueueAbortedError, QueueTimeoutError } from './limiter.ts'
 import { errorClassOf, shortSha, type LogEntry, type Logger } from './log.ts'
 import { checkHtml } from './htmlGuard.ts'
-import { convertTarget, extractText, type ExtractRunners, type Sheet } from './textExtract.ts'
+import { convertTarget, extractText, type ExtractResult, type ExtractRunners, type Sheet } from './textExtract.ts'
 import { applyTextLimit } from './truncate.ts'
+import { composeImageText, visionCacheable, visionCacheKey, visionRetryable, type DescribeImage, type VisionOutcome } from './vision.ts'
 
 export interface ExtractResponse {
   text: string
@@ -20,6 +21,8 @@ export interface ExtractResponse {
   ocr: boolean
   truncated: boolean
   pages?: number
+  /** Описание картинки сервисом зрения (оно же — в начале `text`); только у картинок со зрением. */
+  description?: string
   cached: boolean
   kind: string
   sha256: string
@@ -32,6 +35,8 @@ export interface AppDeps {
   runners: ExtractRunners
   cache: CacheStore
   log: Logger
+  /** Зрение (VISION_URL): описание картинки; нет — картинки только с текстом OCR. */
+  describe?: DescribeImage
   limiter?: Limiter
   now?: () => number
 }
@@ -133,15 +138,60 @@ export const MAX_CONVERT_HTML_BYTES = 5 * 1024 * 1024
 const CLOSE_STATUSES = new Set([401, 413, 503])
 
 export function createApp(deps: AppDeps): Server {
-  const { config, runners, cache, log } = deps
+  const { config, runners, cache, log, describe } = deps
   const limiter = deps.limiter ?? new Limiter(config.maxConcurrency, config.queueTimeoutMs, config.maxQueue)
   const now = deps.now ?? Date.now
-  // Сколько запросов одновременно держат тело в памяти (читают или ждут места). Тело — до
-  // MAX_FILE_BYTES, поэтому без предела очередь копила бы гигабайты. Предел — разборы + очередь.
+  // Сколько запросов одновременно держат тело в памяти (читают, ждут места или разбираются). Тело — до
+  // MAX_FILE_BYTES, поэтому без предела очередь копила бы гигабайты. Предел — разборы + очередь; картинки,
+  // ждущие только зрения, сверх него — их держит очередь зрения (до 3 тел, VISION_MAX_QUEUE + 1).
   const maxInflight = config.maxConcurrency + config.maxQueue
   let inflight = 0
 
   interface Ctx { bytes?: number, queueMs?: number }
+
+  /**
+   * Разбор в месте очереди: ждём место, пишем тело во временный каталог, зовём программы разбора с
+   * таймаутом. Место отдаём сразу после разбора — зрение (оно у картинки идёт параллельно) его не ждёт.
+   * onSlot — сразу после получения места: так зрение не начинается у запроса, которому места не дали.
+   */
+  async function extractInSlot(body: Buffer, fileName: string, ext: string, signal: AbortSignal, ctx: Ctx, onSlot?: () => void): Promise<ExtractResult> {
+    const waitStart = now()
+    let release: () => void
+    try {
+      release = await limiter.acquire(signal)
+    } catch (e) {
+      if (e instanceof QueueAbortedError) throw clientAborted()
+      if (e instanceof QueueTimeoutError) throw new HttpError(503, 'busy', 'сервис занят, повторите позже')
+      throw e
+    } finally {
+      ctx.queueMs = now() - waitStart
+    }
+    // место в очереди отдаём в finally — и если не создался даже временный каталог
+    let dir: string | undefined
+    const ac = new AbortController()
+    const onOuter = (): void => ac.abort(signal.reason)
+    signal.addEventListener('abort', onOuter, { once: true })
+    const timer = setTimeout(() => ac.abort(new ExtractError('timeout', 'разбор не уложился во время')), config.extractTimeoutMs)
+    try {
+      if (signal.aborted) throw clientAborted()
+      onSlot?.()
+      dir = await mkdtemp(join(tmpdir(), 'file-extract-in-'))
+      const input = join(dir, `input.${ext}`)
+      await writeFile(input, body, { mode: 0o600 })
+      return await Promise.race([
+        extractText(input, fileName, runners, ac.signal),
+        new Promise<never>((_, reject) => {
+          ac.signal.addEventListener('abort', () => reject(ac.signal.reason), { once: true })
+        })
+      ])
+    } finally {
+      clearTimeout(timer)
+      signal.removeEventListener('abort', onOuter)
+      ac.abort() // добить дочерние процессы, если разбор ещё что-то держит
+      release()
+      if (dir) await rm(dir, { recursive: true, force: true }).catch(() => {})
+    }
+  }
 
   async function handleExtract(req: IncomingMessage, signal: AbortSignal, ctx: Ctx): Promise<ExtractResponse> {
     if (!checkBearer(req.headers.authorization, config.apiKey)) {
@@ -156,69 +206,76 @@ export function createApp(deps: AppDeps): Server {
     }
     if (inflight >= maxInflight) throw new HttpError(503, 'busy', 'сервис занят, повторите позже')
     inflight++
+    // Тело в памяти считаем, пока его читают, ждут место или разбирают. Картинку, ждущую только зрения, — уже нет:
+    // таких держит очередь зрения (VISION_MAX_QUEUE), а свободное место разбора не должно отвечать 503.
+    let holding = true
+    const letGo = (): void => {
+      if (holding) { holding = false; inflight-- }
+    }
     try {
       const body = await readBody(req, config.maxFileBytes)
       ctx.bytes = body.length
       if (body.length === 0) throw new HttpError(400, 'bad_request', 'пустое тело запроса')
       const sha = createHash('sha256').update(body).digest('hex')
-      const key = cacheKey({ sha, kind: plan.kind, ext: plan.ext, maxTextChars: config.maxTextChars, version: EXTRACTOR_VERSION })
+      const vision = plan.kind === 'image' ? visionCacheKey(config.vision) : ''
+      const key = cacheKey({ sha, kind: plan.kind, ext: plan.ext, maxTextChars: config.maxTextChars, version: EXTRACTOR_VERSION, vision })
 
       const hit = await cache.get(key).catch(() => null) // недоступный кеш — не повод отказать
       // испорченная запись кеша (обрыв записи на диск, чужое значение в Redis) — как промах, а не 500 на сутки
       const parsed = hit ? safeParse(hit) : null
       if (parsed) return { ...parsed, cached: true }
 
-      const waitStart = now()
-      let release: () => void
+      // Зрение — с получением места разбора (не дали места — зрение не начинается), параллельно с OCR и своим
+      // местом: место разбора оно не держит. Конец запроса (ответ, ошибка, уход клиента) — отмена зрения.
+      const visionAc = new AbortController()
+      const stopVision = (): void => visionAc.abort()
+      signal.addEventListener('abort', stopVision, { once: true })
+      const seen: { p: Promise<VisionOutcome> | null } = { p: null }
+      // Описатель не бросает; на всякий случай — синхронное исключение и отказ промиса тоже становятся сбоем зрения
+      const startVision = plan.kind === 'image' && describe
+        ? (): void => { seen.p = Promise.resolve().then(() => describe(body, visionAc.signal)).catch((): VisionOutcome => ({ failure: 'network' })) }
+        : undefined
       try {
-        release = await limiter.acquire(signal)
-      } catch (e) {
-        if (e instanceof QueueAbortedError) throw clientAborted()
-        if (e instanceof QueueTimeoutError) throw new HttpError(503, 'busy', 'сервис занят, повторите позже')
-        throw e
-      } finally {
-        ctx.queueMs = now() - waitStart
-      }
-      // место в очереди отдаём в finally — и если не создался даже временный каталог
-      let dir: string | undefined
-      const ac = new AbortController()
-      const onOuter = (): void => ac.abort(signal.reason)
-      signal.addEventListener('abort', onOuter, { once: true })
-      const timer = setTimeout(() => ac.abort(new ExtractError('timeout', 'разбор не уложился во время')), config.extractTimeoutMs)
-      try {
-        if (signal.aborted) throw clientAborted()
-        dir = await mkdtemp(join(tmpdir(), 'file-extract-in-'))
-        const input = join(dir, `input.${plan.ext}`)
-        await writeFile(input, body, { mode: 0o600 })
-        const r = await Promise.race([
-          extractText(input, fileName, runners, ac.signal),
-          new Promise<never>((_, reject) => {
-            ac.signal.addEventListener('abort', () => reject(ac.signal.reason), { once: true })
-          })
-        ])
-        const lim = applyTextLimit(r.text, r.sheets, config.maxTextChars)
+        let r: ExtractResult
+        try {
+          r = await extractInSlot(body, fileName, plan.ext, signal, ctx, startVision)
+        } catch (e) {
+          // Картинка без читаемого текста: зрение ещё может её описать — ждём его, а не отказываем сразу
+          if (!(seen.p && e instanceof ExtractError && e.code === 'unreadable')) throw e
+          letGo()
+          const v = await seen.p
+          if (!('description' in v)) {
+            // Временный сбой зрения (занято, таймаут, сеть, 5xx, 429) — 503: потребитель повторит, а не скажет «нет текста»
+            if (visionRetryable(v)) throw new HttpError(503, 'busy', 'сервис занят, повторите позже')
+            throw e
+          }
+          r = { kind: 'image', text: '', sheets: [], ocr: true }
+        }
+        letGo()
+        const outcome = seen.p ? await seen.p : null
+        const description = outcome && 'description' in outcome ? outcome.description : undefined
+        const lim = applyTextLimit(description ? composeImageText(description, r.text) : r.text, r.sheets, config.maxTextChars)
         const out: Omit<ExtractResponse, 'cached'> = {
           text: lim.text,
           sheets: lim.sheets,
           ocr: r.ocr,
           truncated: lim.truncated,
           ...(r.pages !== undefined ? { pages: r.pages } : {}),
+          ...(description !== undefined ? { description } : {}),
           kind: r.kind,
           sha256: sha,
           extractorVersion: EXTRACTOR_VERSION
         }
-        // Кешируется только успех; сбой записи кеша ответ не портит.
-        await cache.set(key, JSON.stringify(out), CACHE_TTL_SEC).catch(() => {})
+        // Кешируется только успех; у картинки — и только окончательный итог зрения: таймаут, сеть или
+        // «занято» на сутки не запоминаем. Сбой записи кеша ответ не портит.
+        if (visionCacheable(outcome)) await cache.set(key, JSON.stringify(out), CACHE_TTL_SEC).catch(() => {})
         return { ...out, cached: false }
       } finally {
-        clearTimeout(timer)
-        signal.removeEventListener('abort', onOuter)
-        ac.abort() // добить дочерние процессы, если разбор ещё что-то держит
-        release()
-        if (dir) await rm(dir, { recursive: true, force: true }).catch(() => {})
+        visionAc.abort()
+        signal.removeEventListener('abort', stopVision)
       }
     } finally {
-      inflight--
+      letGo()
     }
   }
 

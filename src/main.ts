@@ -3,6 +3,7 @@ import { ConfigError, EXTRACTOR_VERSION, loadConfig } from './config.ts'
 import { liveExtractRunners } from './extractRunners.ts'
 import { stdoutLogger } from './log.ts'
 import { createApp } from './server.ts'
+import { createDescriber } from './vision.ts'
 
 const SWEEP_INTERVAL_MS = 3_600_000
 
@@ -34,7 +35,12 @@ async function main(): Promise<void> {
   sweep()
   setInterval(sweep, SWEEP_INTERVAL_MS).unref()
 
-  const server = createApp({ config, runners: liveExtractRunners, cache, log: stdoutLogger })
+  // Зрение — только когда задан VISION_URL. Своя очередь (VISION_MAX_QUEUE): одна картинка в работе, ждут не больше
+  // двух и не дольше половины VISION_TIMEOUT_MS. Сбой — в журнал без текста и имён.
+  const describe = config.vision
+    ? createDescriber(config.vision, { onFail: (error) => stdoutLogger({ evt: 'vision_failed', error }) })
+    : null
+  const server = createApp({ config, runners: liveExtractRunners, cache, log: stdoutLogger, ...(describe ? { describe } : {}) })
   // Запрос живёт не дольше ожидания в очереди + разбора + запаса на приём тела и ответ.
   server.requestTimeout = config.extractTimeoutMs + config.queueTimeoutMs + 30_000
   server.listen(config.port, config.host, () => {
