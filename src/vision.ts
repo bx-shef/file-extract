@@ -78,6 +78,16 @@ export function visionCacheable(o: VisionOutcome | null): boolean {
   return o === null || 'description' in o || o.failure === 'unsupported' || o.failure === 'too_large'
 }
 
+/**
+ * Стоит ли потребителю повторить (503), если описания нет, а текста на картинке тоже нет: только временные причины —
+ * занято, таймаут, сеть, 5xx и 429. Пустой или кривой ответ, 4xx, формат и размер — те же байты дадут то же: 422. Чистая.
+ */
+export function visionRetryable(o: VisionOutcome): boolean {
+  if ('description' in o) return false
+  const f = o.failure
+  return f === 'busy' || f === 'timeout' || f === 'network' || f === 'http_429' || /^http_5\d\d$/.test(f)
+}
+
 /** Текст картинки: описание сверху, под ним текст OCR. Без описания — текст OCR как есть. Чистая. */
 export function composeImageText(description: string | null, ocrText: string): string {
   if (!description) return ocrText

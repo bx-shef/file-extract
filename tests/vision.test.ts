@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { Limiter } from '../src/limiter.ts'
 import {
   composeImageText, createDescriber, cutText, MAX_DESCRIPTION_CHARS, MAX_RESPONSE_BYTES, parseDescription, VISION_FORMATS,
-  VISION_MAX_QUEUE, VISION_PROMPT, VISION_PROMPT_VERSION, visionCacheable, visionCacheKey, visionRequestBody, type VisionConfig
+  VISION_MAX_QUEUE, VISION_PROMPT, VISION_PROMPT_VERSION, visionCacheable, visionRetryable, visionCacheKey, visionRequestBody, type VisionConfig
 } from '../src/vision.ts'
 import { gifHeader, pngHeader } from './imageFixtures.ts'
 
@@ -59,6 +59,14 @@ describe('VISION_FORMATS и запрос', () => {
   })
   it('запрос привязан к версии: сменил VISION_PROMPT или выборку (temperature, top_p…) — подними VISION_PROMPT_VERSION (она в ключе кеша) и обнови хеш', () => {
     expect([VISION_PROMPT_VERSION, createHash('sha256').update(visionRequestBody(V, 'image/png', Buffer.alloc(0))).digest('hex').slice(0, 16)]).toEqual(['v1', 'd9b415532ed1f7f4'])
+  })
+})
+
+describe('visionRetryable', () => {
+  it('повторить — только занято, таймаут, сеть, 5xx и 429; пустой ответ, 4xx, формат, размер — нет', () => {
+    expect(['busy', 'timeout', 'network', 'http_503', 'http_500', 'http_429'].map(f => visionRetryable({ failure: f } as never))).toEqual(Array(6).fill(true))
+    expect(['empty', 'bad_response', 'http_401', 'http_400', 'unsupported', 'too_large', 'aborted'].map(f => visionRetryable({ failure: f } as never))).toEqual(Array(7).fill(false))
+    expect(visionRetryable({ description: 'x' })).toBe(false)
   })
 })
 

@@ -13,7 +13,7 @@ import { errorClassOf, shortSha, type LogEntry, type Logger } from './log.ts'
 import { checkHtml } from './htmlGuard.ts'
 import { convertTarget, extractText, type ExtractResult, type ExtractRunners, type Sheet } from './textExtract.ts'
 import { applyTextLimit } from './truncate.ts'
-import { composeImageText, visionCacheable, visionCacheKey, type DescribeImage, type VisionOutcome } from './vision.ts'
+import { composeImageText, visionCacheable, visionCacheKey, visionRetryable, type DescribeImage, type VisionOutcome } from './vision.ts'
 
 export interface ExtractResponse {
   text: string
@@ -141,8 +141,9 @@ export function createApp(deps: AppDeps): Server {
   const { config, runners, cache, log, describe } = deps
   const limiter = deps.limiter ?? new Limiter(config.maxConcurrency, config.queueTimeoutMs, config.maxQueue)
   const now = deps.now ?? Date.now
-  // Сколько запросов одновременно держат тело в памяти (читают или ждут места). Тело — до
-  // MAX_FILE_BYTES, поэтому без предела очередь копила бы гигабайты. Предел — разборы + очередь.
+  // Сколько запросов одновременно держат тело в памяти (читают, ждут места или разбираются). Тело — до
+  // MAX_FILE_BYTES, поэтому без предела очередь копила бы гигабайты. Предел — разборы + очередь; картинки,
+  // ждущие только зрения, сверх него — их держит очередь зрения (до 3 тел, VISION_MAX_QUEUE + 1).
   const maxInflight = config.maxConcurrency + config.maxQueue
   let inflight = 0
 
@@ -165,7 +166,6 @@ export function createApp(deps: AppDeps): Server {
     } finally {
       ctx.queueMs = now() - waitStart
     }
-    onSlot?.()
     // место в очереди отдаём в finally — и если не создался даже временный каталог
     let dir: string | undefined
     const ac = new AbortController()
@@ -174,6 +174,7 @@ export function createApp(deps: AppDeps): Server {
     const timer = setTimeout(() => ac.abort(new ExtractError('timeout', 'разбор не уложился во время')), config.extractTimeoutMs)
     try {
       if (signal.aborted) throw clientAborted()
+      onSlot?.()
       dir = await mkdtemp(join(tmpdir(), 'file-extract-in-'))
       const input = join(dir, `input.${ext}`)
       await writeFile(input, body, { mode: 0o600 })
@@ -230,7 +231,10 @@ export function createApp(deps: AppDeps): Server {
       const stopVision = (): void => visionAc.abort()
       signal.addEventListener('abort', stopVision, { once: true })
       const seen: { p: Promise<VisionOutcome> | null } = { p: null }
-      const startVision = plan.kind === 'image' && describe ? (): void => { seen.p = describe(body, visionAc.signal) } : undefined
+      // Описатель не бросает; на всякий случай — синхронное исключение и отказ промиса тоже становятся сбоем зрения
+      const startVision = plan.kind === 'image' && describe
+        ? (): void => { seen.p = Promise.resolve().then(() => describe(body, visionAc.signal)).catch((): VisionOutcome => ({ failure: 'network' })) }
+        : undefined
       try {
         let r: ExtractResult
         try {
@@ -239,7 +243,12 @@ export function createApp(deps: AppDeps): Server {
           // Картинка без читаемого текста: зрение ещё может её описать — ждём его, а не отказываем сразу
           if (!(seen.p && e instanceof ExtractError && e.code === 'unreadable')) throw e
           letGo()
-          if (!('description' in await seen.p)) throw e
+          const v = await seen.p
+          if (!('description' in v)) {
+            // Временный сбой зрения (занято, таймаут, сеть, 5xx, 429) — 503: потребитель повторит, а не скажет «нет текста»
+            if (visionRetryable(v)) throw new HttpError(503, 'busy', 'сервис занят, повторите позже')
+            throw e
+          }
           r = { kind: 'image', text: '', sheets: [], ocr: true }
         }
         letGo()

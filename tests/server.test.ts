@@ -184,12 +184,23 @@ describe('HTTP: POST /extract', () => {
     expect(r.status).toBe(200)
     expect(await r.json()).toMatchObject({ description: 'Фото склада.', text: 'Описание картинки: Фото склада.\n\nТекста на картинке не найдено.' })
   })
-  it('нет текста и нет описания — 422 unreadable, как без зрения', async () => {
+  it('нет текста, зрение временно не ответило — 503 busy (повторить), а не «нет текста»; пустой ответ модели — 422 unreadable', async () => {
     const runners = fakeRunners({ ocr: vi.fn(async () => ({ text: ' ', pages: 1 })) })
-    const { extract } = await start({ runners, describe: outcome({ failure: 'network' }), config: { vision: VISION } })
-    const r = await extract('x', 'photo.jpg')
-    expect(r.status).toBe(422)
-    expect(((await r.json()) as any).error).toBe('unreadable')
+    const { extract } = await start({ runners, describe: outcome({ failure: 'busy' }), config: { vision: VISION } })
+    const busy = await extract('x', 'photo.jpg')
+    expect([busy.status, ((await busy.json()) as any).error]).toEqual([503, 'busy'])
+    await new Promise(r => server!.close(r))
+    server = null
+    const second = await start({ runners, describe: outcome({ failure: 'empty' }), config: { vision: VISION } })
+    const r = await second.extract('x', 'photo.jpg')
+    expect([r.status, ((await r.json()) as any).error]).toEqual([422, 'unreadable'])
+  })
+  it('описатель бросил синхронно — картинка с текстом OCR, место разбора не потеряно', async () => {
+    const see = vi.fn((): Promise<VisionOutcome> => { throw new Error('сбой описателя') })
+    const { extract } = await start({ describe: see, config: { vision: VISION, maxConcurrency: 1, queueTimeoutMs: 300 } })
+    const r = await extract('x', 'shot.png')
+    expect(await r.json()).toMatchObject({ text: 'распознанный текст скана', cached: false })
+    expect((await extract('y', 'a.txt')).status).toBe(200)
   })
   it('включили зрение — картинка не берётся из кеша без описания; PDF — берётся', async () => {
     const cache = memCache()
