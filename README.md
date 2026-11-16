@@ -151,7 +151,7 @@ HTML сперва проверяется и пересобирается (`src/h
 
 ## Зрение — описание картинок
 
-Включается переменными `VISION_URL` и `VISION_API_KEY`. Сервис зрения — [toolsai-vision](https://github.com/bx-shef/toolsai-vision) (образ `ghcr.io/bx-shef/toolsai-vision`;  его README — «Установка у клиента»). Он слушает `127.0.0.1:8093`, имя модели `vision`.
+Включается переменными `VISION_URL` и `VISION_API_KEY`. Сервис зрения — [toolsai-vision](https://github.com/bx-shef/toolsai-vision) (образ `ghcr.io/bx-shef/toolsai-vision`; его README — «Установка у клиента»). Он слушает `127.0.0.1:8093`, имя модели `vision`.
 
 - **Что происходит.** Картинка получила место разбора — и идёт в OCR и, параллельно, в сервис зрения (`data:`-адрес
   внутри запроса). Ответ: `text` = «Описание картинки: …» + «Текст с картинки: …», поле `description` — само описание.
