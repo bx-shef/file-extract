@@ -1,6 +1,6 @@
 # CLAUDE.md — file-extract
 
-> Last reviewed: 2026-11-15
+> Last reviewed: 2026-11-16
 
 Внутренний сервис разбора файлов: файл → текст и листы таблиц. Голый `node:http`, Node 22,
 TypeScript запускается через `node --experimental-strip-types` (сборки нет), тесты — vitest.
@@ -24,7 +24,7 @@ docker build -t file-extract .
 | `src/formats.ts` | расширения и выбор способа разбора (`planExtraction`, `SUPPORTED_EXT`) |
 | `src/textExtract.ts` | маршрутизация разбора, `MIN_PDF_TEXT`, откат на OCR, единая точка очистки `finishText`; исполнители внедряются |
 | `src/extractRunners.ts` | живые исполнители: spawn с группой процессов (cwd/HOME/XDG — рабочий каталог), `subprocessEnv`, `isolatedHome`, профиль LibreOffice `LO_REGISTRY`, потолки `MAX_PDF_TEXT_PAGES`/`MAX_SHEET_CSV_BYTES`, `checkImagePixels`, `decodeBytes`, `officeConvertTarget`, `parseOfficeCsvSheets`/`parseOfficeCsvOutputs`, `countRows`, `MAX_SHEET_CSVS`, `MAX_OCR_PDF_PAGES`, `orderPdfPageImages`, `hasPdfMagic`; набор `liveExtractRunners` |
-| `src/vision.ts` | зрение: описание картинки сервисом toolsai-light `vision` — `createDescriber` (исход `{ description } \| { failure }`, своя очередь `Limiter(1)`, формат по байтам `VISION_FORMATS` и `MAX_IMAGE_PIXELS` до запроса, ответ не больше `MAX_RESPONSE_BYTES`), `parseDescription` (C0/C1 и bidi вон, `cutText`), `composeImageText`, `visionCacheKey`, `visionCacheable`, `VISION_PROMPT_VERSION`; сбой — `vision_failed` в журнал |
+| `src/vision.ts` | зрение: описание картинки сервисом toolsai-vision — `createDescriber` (исход `{ description } \| { failure }`, своя очередь `Limiter(1)`, формат по байтам `VISION_FORMATS` и `MAX_IMAGE_PIXELS` до запроса, ответ не больше `MAX_RESPONSE_BYTES`), `parseDescription` (C0/C1 и bidi вон, `cutText`), `composeImageText`, `visionCacheKey`, `visionCacheable`, `VISION_PROMPT_VERSION`; сбой — `vision_failed` в журнал |
 | `src/imageSize.ts` | размеры картинки по заголовку (PNG/JPEG/TIFF/BMP/WEBP), формат по сигнатуре `imageFormat`, `MAX_IMAGE_PIXELS` |
 | `src/textSanitize.ts` | `sanitizeExtractedText`, порог читаемости `MIN_READABLE_CHARS` |
 | `src/server.ts` | HTTP `POST /v1/extract` (`EXTRACT_PATH`), `POST /v1/convert` (`CONVERT_PATH`, HTML → PDF/DOCX без кеша) и `GET /health` (версия разборщика): авторизация, лимит размера, место для тела, кеш, очередь (`extractInSlot` — место отдаётся сразу после разбора), зрение у картинок параллельно, таймаут, уход клиента, временный каталог, коды ошибок |

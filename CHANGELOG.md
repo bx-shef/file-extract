@@ -1,10 +1,12 @@
 # Изменения
 
-> Last reviewed: 2026-11-15
+> Last reviewed: 2026-11-16
 
 Версии — semver; новое — сверху под «Не выпущено», выпуск — `CLAUDE.md`, «Версии и выпуск».
 
 ## Не выпущено
+
+- Документация: сервис зрения — bx-shef/toolsai-vision (вынесен из toolsai-light 16.11): README «Зрение», `.env.example`, `docker-compose.example.yml`, CLAUDE.md. Код и настройки (`VISION_URL`, `VISION_API_KEY`) не меняются.
 
 ## 0.3.0 — 2026-11-15
 
