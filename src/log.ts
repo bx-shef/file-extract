@@ -14,6 +14,8 @@ export interface LogEntry {
   /** Первые 12 знаков sha256 файла — для сопоставления, не для восстановления. */
   sha?: string
   cached?: boolean
+  /** Ответ дан по разбору, начатому другим запросом с тем же файлом (single-flight). */
+  shared?: boolean
   /** Машинный код ответа (unauthorized, timeout, client_aborted…). */
   error?: string
   /** Для 500 internal — класс системной ошибки (`ENOSPC`, `EACCES`…), без текста и путей. */
