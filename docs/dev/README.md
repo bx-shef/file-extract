@@ -1,6 +1,6 @@
 # file-extract для разработчиков
 
-> Last reviewed: 2026-11-15
+> Last reviewed: 2026-11-17
 
 Сервис отдаёт соседям линейки одну операцию: файл → текст (а у таблиц — ещё листы CSV).
 Разбор живёт в одном месте, а не копиями в каждом продукте.
@@ -23,7 +23,7 @@
    `ghcr.io/bx-shef/file-extract:<sha коммита>` — по примеру `docker-compose.example.yml`.
 2. Свой сервис получает адрес и ключ из окружения. Образец — toolsai-mcp: `FILE_EXTRACT_URL`
    (`http://file-extract:3000`, только http(s), без логина, `?query` и `#`) и `FILE_EXTRACT_KEY`
-   (= `EXTRACT_API_KEY` сервиса, не короче 16 знаков); заданы оба или ни одного.
+   (= `EXTRACT_API_KEY` сервиса или ваш ключ из `EXTRACT_API_KEYS` — просите у администратора отдельный, с вашей меткой; не короче 16 знаков); заданы оба или ни одного.
 3. Запрос — `POST /v1/extract` с телом-файлом, `X-File-Name` и `Authorization: Bearer` ([API.md](API.md)).
 4. Таймаут клиента — меньше `EXTRACT_TIMEOUT_MS` сервиса (у toolsai-mcp `FILE_EXTRACT_TIMEOUT_MS`
    280 000 мс при 300 000 у сервиса); `503` и `504` — повторить позже, остальные отказы — нет.
