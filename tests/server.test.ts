@@ -907,6 +907,22 @@ describe('HTTP: одинаковые одновременные запросы (
     expect(await (await b).json()).toMatchObject({ text: 'для второго' })
   })
 
+  it('ушёл ждущий, а начавший остался — разбор идёт, начавший получает ответ', async () => {
+    const g = gated()
+    const { extract, base } = await start2(g)
+    const a = extract('f', 'a.txt')
+    await vi.waitFor(() => expect(g.readText).toHaveBeenCalledTimes(1))
+    const ac = new AbortController()
+    const b = fetch(`${base}/v1/extract`, { method: 'POST', headers: { 'x-file-name': 'a.txt', authorization: `Bearer ${KEY}` }, body: 'f', signal: ac.signal }).catch(() => null)
+    await new Promise(r => setTimeout(r, 50))
+    ac.abort()
+    await b
+    await new Promise(r => setTimeout(r, 50))
+    expect(g.aborted()).toBe(0)
+    g.open('достаточно длинный читаемый текст')
+    expect((await a).status).toBe(200)
+  })
+
   it('ушли все — разбор прерывается, и новый запрос начинает свежий', async () => {
     const g = gated()
     const { base, extract } = await start2(g)

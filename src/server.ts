@@ -125,6 +125,9 @@ function safeParse(raw: string): Omit<ExtractResponse, 'cached'> | null {
   } catch { return null }
 }
 
+/** Сколько общий разбор ждёт записи в кеш, прежде чем отдать ответ. */
+const CACHE_SET_WAIT_MS = 5_000
+
 /** Адрес разбора. Версия в пути — чтобы менять ответ, не ломая старых клиентов. */
 export const EXTRACT_PATH = '/v1/extract'
 
@@ -314,7 +317,8 @@ export function createApp(deps: AppDeps): Server {
           }
           // Кешируется только успех; у картинки — и только окончательный итог зрения: таймаут, сеть или
           // «занято» на сутки не запоминаем. Сбой записи кеша ответ не портит.
-          if (visionCacheable(outcome)) await cache.set(key, JSON.stringify(out), CACHE_TTL_SEC).catch(() => {})
+          // Запись ждём недолго: зависший Redis не должен держать общий разбор, а с ним и всех ждущих.
+          if (visionCacheable(outcome)) await Promise.race([cache.set(key, JSON.stringify(out), CACHE_TTL_SEC).catch(() => {}), new Promise<void>(r => setTimeout(r, CACHE_SET_WAIT_MS).unref())])
           return out
         } finally {
           visionAc.abort()
@@ -409,7 +413,7 @@ export function createApp(deps: AppDeps): Server {
         const m = EXTRACT_STATUS[e.code]
         status = m[0]; code = m[1]; message = e.message
       }
-      log({ evt, kind, ms: now() - started, ...(ctx.queueMs !== undefined ? { queueMs: ctx.queueMs } : {}), ...(ctx.bytes !== undefined ? { bytes: ctx.bytes } : {}), error: code, ...(status === 500 ? { errorClass: errorClassOf(e) } : {}) })
+      log({ evt, kind, ms: now() - started, ...(ctx.queueMs !== undefined ? { queueMs: ctx.queueMs } : {}), ...(ctx.bytes !== undefined ? { bytes: ctx.bytes } : {}), error: code, ...(ctx.shared ? { shared: true } : {}), ...(status === 500 ? { errorClass: errorClassOf(e) } : {}) })
       if (code === 'client_aborted' || res.destroyed) {
         req.destroy()
         return
