@@ -139,6 +139,9 @@ export const CONVERT_PATH = '/v1/convert'
 /** Потолок HTML на сборку: КП — десятки КБ, картинки встраиваются data:-адресами. */
 export const MAX_CONVERT_HTML_BYTES = 5 * 1024 * 1024
 
+/** Сколько результат проверки готовности живёт для всех запросов /health. */
+const READY_TTL_MS = 5_000
+
 /** Статусы, после которых тело запроса могло остаться недочитанным: соединение закрываем. */
 const CLOSE_STATUSES = new Set([401, 413, 503])
 
@@ -409,7 +412,15 @@ export function createApp(deps: AppDeps): Server {
 
   /** Готовность: программы разбора на месте и кеш пригоден. Недоступный кеш разбор не останавливает (отдаёт без кеша),
    *  но сообщается — это деградация. Проверки с потолком времени: зависший Redis не должен вешать /health. */
-  async function readiness(): Promise<{ ok: boolean, programs: boolean, cache: boolean }> {
+  type Ready = { ok: boolean, programs: boolean, cache: boolean }
+  // /health открыт без ключа: результат делится между запросами на READY_TTL_MS (одна проверка на всех), иначе поток
+  // анонимных запросов превращался бы в поток обращений к файловой системе и Redis.
+  let readyCache: { at: number, p: Promise<Ready> } | null = null
+  function readiness(): Promise<Ready> {
+    if (!readyCache || now() - readyCache.at >= READY_TTL_MS) readyCache = { at: now(), p: checkReady() }
+    return readyCache.p
+  }
+  async function checkReady(): Promise<Ready> {
     const within = (p: Promise<boolean> | undefined): Promise<boolean> => p
       ? Promise.race([p.catch(() => false), new Promise<boolean>(r => setTimeout(() => r(false), 2_000).unref())])
       : Promise.resolve(true)

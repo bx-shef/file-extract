@@ -831,7 +831,6 @@ describe('HTTP: POST /v1/convert', () => {
   })
 })
 
-<<<<<<< HEAD
 describe('HTTP: одинаковые одновременные запросы (single-flight, #35)', () => {
   /** Разбор, который держится, пока не позовут open(): так видно, что второй запрос не запустил свой. */
   function gated() {
@@ -950,7 +949,7 @@ describe('HTTP: одинаковые одновременные запросы (
     g.open('достаточно длинный читаемый текст')
     expect((await a).status).toBe(200)
     expect((await b).status).toBe(200)
-=======
+
 describe('HTTP: готовность и метрики (#38)', () => {
   it('/health: 200, version как прежде, плюс ready и checks; без ключа', async () => {
     const { base } = await start()
@@ -977,6 +976,12 @@ describe('HTTP: готовность и метрики (#38)', () => {
     expect(await (await fetch(`${base}/health`)).json()).toMatchObject({ checks: { cache: false } })
     expect(Date.now() - started).toBeLessThan(4000)
   }, 8000)
+  it('/health делит проверку между запросами: поток запросов — одна проверка', async () => {
+    const ping = vi.fn(async () => true)
+    const { base } = await start({ cache: { ...memCache(), ping } })
+    await Promise.all(Array.from({ length: 10 }, () => fetch(`${base}/health`).then(r => r.json())))
+    expect(ping).toHaveBeenCalledTimes(1)
+  })
   it('/metrics без ключа — 401, с неверным — 401; только GET', async () => {
     const { base } = await start()
     expect((await fetch(`${base}/metrics`)).status).toBe(401)
@@ -1000,6 +1005,5 @@ describe('HTTP: готовность и метрики (#38)', () => {
     expect(t).toMatch(/file_extract_cache_misses_total [2-9]/)
     expect(t).not.toContain('Иванов')
     expect(t).not.toContain(KEY)
->>>>>>> 39ef685 (Метрики /metrics и готовность в /health (#38))
   })
 })
