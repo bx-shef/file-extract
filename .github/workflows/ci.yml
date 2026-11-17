@@ -61,7 +61,24 @@ jobs:
         with:
           context: .
           push: false
+          load: true
+          tags: file-extract:ci
           cache-from: type=gha
+      # Сканер образа (Trivy) и SBOM — tools/scan-image.sh (тот же скрипт запускают руками). Порог HIGH/CRITICAL с
+      # исправлением; исключения — .trivyignore (с причиной и сроком). Пока без падения (SCAN_EXIT ниже).
+      - name: Сканирование образа и SBOM
+        env:
+          # 0 — только отчёт (в базовом образе node:22-slim сейчас есть исправимые HIGH); 1 — падать. Переключает владелец.
+          SCAN_EXIT: '0'
+        run: bash tools/scan-image.sh file-extract:ci scan-out
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: scan-pr
+          path: |
+            scan-out/report.txt
+            scan-out/sbom.cdx.json
+          if-no-files-found: ignore
 
   publish:
     # Только push в main: сборка и публикация в GHCR. `packages: write` — только у этой джобы.
@@ -82,10 +99,34 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # Сначала сборка в локальный образ и сканирование: при SCAN_EXIT=1 образ с исправимой HIGH/CRITICAL в ghcr не уходит.
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          push: false
+          load: true
+          tags: file-extract:ci
+          cache-from: type=gha
+      - name: Сканирование образа и SBOM
+        env:
+          # 0 — только отчёт (в базовом образе node:22-slim сейчас есть исправимые HIGH); 1 — падать. Переключает владелец.
+          SCAN_EXIT: '0'
+        run: bash tools/scan-image.sh file-extract:ci scan-out
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: scan-${{ github.sha }}
+          path: |
+            scan-out/report.txt
+            scan-out/sbom.cdx.json
+          if-no-files-found: ignore
+      # Публикация: provenance (mode=max — откуда и из чего собрано) и SBOM BuildKit кладёт в сам образ как аттестации.
       - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           push: true
+          provenance: mode=max
+          sbom: true
           tags: |
             ghcr.io/bx-shef/file-extract:latest
             ghcr.io/bx-shef/file-extract:${{ github.sha }}

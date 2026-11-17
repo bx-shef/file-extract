@@ -1,4 +1,5 @@
 node_modules/
+scan-out/
 coverage/
 .env
 .env.*

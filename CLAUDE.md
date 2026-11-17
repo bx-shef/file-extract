@@ -15,6 +15,7 @@ pnpm typecheck   # tsc --noEmit
 pnpm test        # vitest run
 pnpm start       # node --experimental-strip-types src/main.ts (нужен EXTRACT_API_KEY)
 docker build -t file-extract .
+PW_RUN=../stand/tools/pw-run.sh bash tools/scan-image.sh file-extract   # Trivy + SBOM (README)
 ```
 
 ## Карта
@@ -33,6 +34,7 @@ docker build -t file-extract .
 | `src/metrics.ts` | счётчики и текст Prometheus для `/metrics` (статусы, кеш, очередь, память); метки — закрытый набор |
 | `src/limiter.ts`, `src/truncate.ts`, `src/auth.ts` (`authenticate` — потребитель по ключу), `src/config.ts`, `src/log.ts`, `src/errors.ts` | очередь, потолок текста, ключ, настройки (`loadConfig`, `CACHE_TTL_SEC`, `MIN_API_KEY_LENGTH`) и `EXTRACTOR_VERSION`, журнал, коды ошибок |
 | `src/main.ts` | запуск: настройки, выбор кеша, чистка раз в час |
+| `tools/scan-image.sh`, `.trivyignore`, `.github/workflows/scan.yml` | сканирование образа (Trivy) и SBOM, исключения, еженедельный просмотр `latest` |
 | `docs/dev/` | для разработчиков соседних сервисов: подключение, HTTP-контракт (`API.md`), системные требования |
 | `tests/` | чистая логика + `server.test.ts` (HTTP на подставных исполнителях, без программ) + `integration.test.ts` (настоящие программы, пропускается без `soffice`) |
 
