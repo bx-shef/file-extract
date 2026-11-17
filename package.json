@@ -13,7 +13,7 @@
     "check": "pnpm typecheck && pnpm test"
   },
   "dependencies": {
-    "ioredis": "5.8.2"
+    "ioredis": "6.0.0"
   },
   "devDependencies": {
     "@types/node": "22.20.5",
