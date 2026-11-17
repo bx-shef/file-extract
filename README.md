@@ -170,6 +170,7 @@ HTML сперва проверяется и пересобирается (`src/h
   чего собран. Посмотреть: `docker buildx imagetools inspect ghcr.io/bx-shef/file-extract:<sha> --format '{{ json .Provenance }}'`
   и `--format '{{ json .SBOM }}'`. В списке версий пакета ghcr появятся записи `unknown/unknown` — это аттестации, не отдельные
   образы; закрепление по тегу `<sha>` (`FILE_EXTRACT_TAG`) работает как прежде. Подпись (cosign, attest-build-provenance) не добавлена — вопрос владельцу.
+- Ограничение: при публикации сканируется одна сборка образа, а в ghcr уходит вторая (слои из кеша buildx, но digest не привязан к просканированному); привязать скан к digest — при включении падения (`SCAN_EXIT: '1'`).
 - GitHub Actions у владельца выключены (биллинг): все эти проверки руками — скрипт выше, workflow `workflow_dispatch`.
 
 ## Настройки (env)
