@@ -31,7 +31,7 @@ docker build -t file-extract .
 | `src/htmlGuard.ts` | проверка и пересборка HTML для `/v1/convert`: `checkHtml` (линейный сканер тегов с кавычками; `<style>` — сырой текст без «<»; `data:image` по сигнатуре PNG/JPEG/GIF и размерам, `MAX_IMAGE_PIXELS` на документ; `<a>` и `href` — текстом), `unsafeHtml`, `normalizeHtml`; тесты — `tests/htmlGuard.test.ts`, байты картинок — `tests/imageFixtures.ts` |
 | `src/cache.ts` | ключ кеша (версия, способ, расширение, потолок текста, зрение у картинок, sha), хранилища на диске (с потолком размера) и в Redis (порт `CacheStore`) |
 | `src/metrics.ts` | счётчики и текст Prometheus для `/metrics` (статусы, кеш, очередь, память); метки — закрытый набор |
-| `src/limiter.ts`, `src/truncate.ts`, `src/auth.ts`, `src/config.ts`, `src/log.ts`, `src/errors.ts` | очередь, потолок текста, ключ, настройки (`loadConfig`, `CACHE_TTL_SEC`, `MIN_API_KEY_LENGTH`) и `EXTRACTOR_VERSION`, журнал, коды ошибок |
+| `src/limiter.ts`, `src/truncate.ts`, `src/auth.ts` (`authenticate` — потребитель по ключу), `src/config.ts`, `src/log.ts`, `src/errors.ts` | очередь, потолок текста, ключ, настройки (`loadConfig`, `CACHE_TTL_SEC`, `MIN_API_KEY_LENGTH`) и `EXTRACTOR_VERSION`, журнал, коды ошибок |
 | `src/main.ts` | запуск: настройки, выбор кеша, чистка раз в час |
 | `docs/dev/` | для разработчиков соседних сервисов: подключение, HTTP-контракт (`API.md`), системные требования |
 | `tests/` | чистая логика + `server.test.ts` (HTTP на подставных исполнителях, без программ) + `integration.test.ts` (настоящие программы, пропускается без `soffice`) |
@@ -50,7 +50,8 @@ docker build -t file-extract .
 - **Процессы разбора — только через `run()`**: окружение без секретов, свой рабочий каталог
   (cwd/HOME/XDG), таймаут, убийство группы (и после обычного завершения).
 - **LibreOffice — без `--safe-mode`**: он отбрасывает профиль с `LO_REGISTRY` (проверено вживую).
-- **Новый вход, от которого зависит ответ, — в ключ кеша** (`CacheKeyInput`).
+- **Новый вход, от которого зависит ответ, — в ключ кеша** (`CacheKeyInput`). Потребитель (метка ключа) — тоже в ключе: общий кеш подсказывал бы одному потребителю, что файл присылал другой (#36).
+- **Ключи потребителей:** `EXTRACT_API_KEYS` (`метка:ключ`) и старый `EXTRACT_API_KEY` (метка `default`); в журнал — метка (`consumer`), ключ — никогда, и в текст ошибок настроек — тоже.
 - **Зрение — не сбой разбора** (toolsai-light#13): описание картинки — `data:`-адресом в сервис зрения; начинается с
   получением места разбора (`onSlot` в `extractInSlot`), идёт параллельно с OCR и своим местом (`VISION_MAX_QUEUE`: одна в
   работе, две ждут не дольше половины таймаута). Место разбора и место тела (`inflight`) картинка, ждущая только зрения,

@@ -6,6 +6,8 @@
 export interface LogEntry {
   evt: 'extract' | 'convert' | 'start' | 'cache_sweep' | 'cache_sweep_failed' | 'error' | 'vision_failed'
   kind?: string
+  /** Метка потребителя (не ключ), если ключ опознан. */
+  consumer?: string
   bytes?: number
   /** Время от приёма запроса до ответа. */
   ms?: number

@@ -361,12 +361,12 @@ describe('HTTP: адреса и версия', () => {
 })
 
 describe('HTTP: журнал', () => {
-  const ALLOWED = new Set(['evt', 'kind', 'bytes', 'ms', 'queueMs', 'sha', 'cached', 'error', 'errorClass'])
+  const ALLOWED = new Set(['evt', 'kind', 'consumer', 'bytes', 'ms', 'queueMs', 'sha', 'cached', 'error', 'errorClass'])
   it('в записи разбора — ровно разрешённые ключи, имени файла нет', async () => {
     const logs: LogEntry[] = []
     const { extract } = await start({ logs })
     await extract('x', 'Иванов.txt')
-    expect(new Set(Object.keys(logs[0]!))).toEqual(new Set(['evt', 'kind', 'bytes', 'ms', 'queueMs', 'sha', 'cached']))
+    expect(new Set(Object.keys(logs[0]!))).toEqual(new Set(['evt', 'kind', 'consumer', 'bytes', 'ms', 'queueMs', 'sha', 'cached']))
     expect(logs[0]!.bytes).toBe(1)
     for (const l of logs) for (const k of Object.keys(l)) expect(ALLOWED.has(k)).toBe(true)
     expect(JSON.stringify(logs)).not.toContain('Иванов')
@@ -1020,5 +1020,46 @@ describe('HTTP: готовность и метрики (#38)', () => {
     expect(t).toMatch(/file_extract_cache_misses_total [2-9]/)
     expect(t).not.toContain('Иванов')
     expect(t).not.toContain(KEY)
+
+describe('HTTP: ключи потребителей (#36)', () => {
+  const KA = 'mcp-key-0123456789abcdef'
+  const KB = 'bank-key-0123456789abcdef'
+  const consumers = [{ label: 'mcp', key: KA }, { label: 'bank', key: KB }]
+  const post = (base: string, key: string, body: string, name = 'a.txt') =>
+    fetch(`${base}/v1/extract`, { method: 'POST', headers: { 'x-file-name': name, authorization: `Bearer ${key}` }, body })
+
+  it('любой ключ из списка пускает, чужой — 401; метка — в журнале, ключа в журнале нет', async () => {
+    const logs: LogEntry[] = []
+    const { base } = await start({ config: { consumers }, logs })
+    expect((await post(base, KA, 'x')).status).toBe(200)
+    expect((await post(base, KB, 'y')).status).toBe(200)
+    expect((await post(base, 'wrong-key-0123456789abcdef', 'z')).status).toBe(401)
+    expect(logs.filter(l => l.evt === 'extract' && !l.error).map(l => l.consumer)).toEqual(['mcp', 'bank'])
+    expect(logs.find(l => l.error === 'unauthorized')!.consumer).toBeUndefined()
+    expect(JSON.stringify(logs)).not.toContain(KA)
+    expect(JSON.stringify(logs)).not.toContain(KB)
+  })
+  it('старый EXTRACT_API_KEY работает: метка default', async () => {
+    const logs: LogEntry[] = []
+    const { extract } = await start({ logs })
+    expect((await extract('x', 'a.txt')).status).toBe(200)
+    expect(logs[0]).toMatchObject({ consumer: 'default' })
+  })
+  it('кеш по потребителю: тот же файл у другого потребителя — не из кеша (нет оракула наличия)', async () => {
+    const runners = fakeRunners()
+    const { base } = await start({ config: { consumers }, runners })
+    const first = await (await post(base, KA, 'тот же файл')).json() as any
+    const again = await (await post(base, KA, 'тот же файл')).json() as any
+    const other = await (await post(base, KB, 'тот же файл')).json() as any
+    expect([first.cached, again.cached, other.cached]).toEqual([false, true, false])
+    expect(runners.readText).toHaveBeenCalledTimes(2)
+  })
+  it('сборка документа: метка потребителя в журнале, чужой ключ — 401', async () => {
+    const logs: LogEntry[] = []
+    const { base } = await start({ config: { consumers }, logs })
+    const conv = (key: string) => fetch(`${base}/v1/convert?to=pdf`, { method: 'POST', headers: { authorization: `Bearer ${key}` }, body: '<p>x</p>' })
+    expect((await conv(KB)).status).toBe(200)
+    expect((await conv('nope-nope-nope-nope-1')).status).toBe(401)
+    expect(logs.find(l => l.evt === 'convert' && !l.error)).toMatchObject({ consumer: 'bank' })
   })
 })

@@ -9,9 +9,9 @@
 
 | метод и путь | ключ | что |
 |---|---|---|
-| `POST /v1/extract` | `Authorization: Bearer <EXTRACT_API_KEY>` | разбор файла |
+| `POST /v1/extract` | `Authorization: Bearer <ключ потребителя>` (`EXTRACT_API_KEY` или ключ из `EXTRACT_API_KEYS`) | разбор файла |
 | `GET /health` | нет | `200 {"ok": true, "version": "<EXTRACTOR_VERSION>", "ready": true, "checks": {"programs": true, "cache": true}}`; `?ready=1` — 503 при `ready: false` |
-| `GET /metrics` | тот же Bearer | метрики Prometheus: статусы (503/504), очередь, кеш, память |
+| `GET /metrics` | тот же Bearer (любой ключ потребителя) | метрики Prometheus: статусы (503/504), очередь, кеш, память |
 
 Другие пути — `404 not_found`, другой метод — `405 method_not_allowed`.
 

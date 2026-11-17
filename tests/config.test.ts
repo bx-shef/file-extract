@@ -10,7 +10,7 @@ describe('loadConfig', () => {
     expect(() => loadConfig({ EXTRACT_API_KEY: 'short' })).toThrow(ConfigError)
   })
   it('в тестах ключ необязателен', () => {
-    expect(loadConfig({ NODE_ENV: 'test' }).apiKey).toBe('')
+    expect(loadConfig({ NODE_ENV: 'test' }).consumers).toEqual([])
   })
   it('умолчания', () => {
     const c = loadConfig({ EXTRACT_API_KEY: 'x'.repeat(16) })
@@ -42,5 +42,38 @@ describe('loadConfig', () => {
   it('кривое число — ошибка, а не молчаливое умолчание', () => {
     expect(() => loadConfig({ NODE_ENV: 'test', MAX_CONCURRENCY: '0' })).toThrow(ConfigError)
     expect(() => loadConfig({ NODE_ENV: 'test', MAX_FILE_BYTES: '1e5x' })).toThrow(ConfigError)
+  })
+})
+
+describe('EXTRACT_API_KEYS: ключи потребителей', () => {
+  const A = 'a'.repeat(16)
+  const B = 'b'.repeat(16)
+  it('список метка:ключ через запятую и перевод строки; старый ключ — метка default', () => {
+    const c = loadConfig({ EXTRACT_API_KEYS: `mcp:${A},price-import:${B}\nbank:${'c'.repeat(16)}`, EXTRACT_API_KEY: 'd'.repeat(16) })
+    expect(c.consumers.map(x => x.label)).toEqual(['default', 'mcp', 'price-import', 'bank'])
+  })
+  it('только старый ключ работает как раньше', () => {
+    expect(loadConfig({ EXTRACT_API_KEY: A }).consumers).toEqual([{ label: 'default', key: A }])
+  })
+  it('ключ — всё после первого «:»', () => {
+    expect(loadConfig({ EXTRACT_API_KEYS: `mcp:ab:cd${'x'.repeat(14)}` }).consumers[0]!.key).toBe(`ab:cd${'x'.repeat(14)}`)
+  })
+  it('без ключей (оба пусты) — не стартует; в тестах можно', () => {
+    expect(() => loadConfig({ EXTRACT_API_KEYS: '  ' })).toThrow(/не заданы/)
+    expect(loadConfig({ NODE_ENV: 'test', EXTRACT_API_KEYS: '' }).consumers).toEqual([])
+  })
+  it('плохая метка, короткий ключ, один ключ у двух меток — ошибки, а текст без самих ключей', () => {
+    expect(() => loadConfig({ EXTRACT_API_KEYS: `Bad Label:${A}` })).toThrow(ConfigError)
+    expect(() => loadConfig({ EXTRACT_API_KEYS: `${A}` })).toThrow(ConfigError)
+    expect(() => loadConfig({ EXTRACT_API_KEYS: 'mcp:short' })).toThrow(/запись 1 \(mcp\)/)
+    const secret = 'SeCrEt-0123456789'
+    expect(() => loadConfig({ EXTRACT_API_KEYS: `mcp:${secret},bank:${secret}` })).toThrow(/mcp и bank/)
+    try { loadConfig({ EXTRACT_API_KEYS: `mcp:${secret},bank:${secret}` }) } catch (e) { expect(String(e)).not.toContain(secret) }
+    try { loadConfig({ EXTRACT_API_KEYS: 'mcp:sh ort-key-with-space-1234' }) } catch (e) { expect(String(e)).not.toContain('ort-key') }
+  })
+  it('одна метка с двумя ключами — ротация; метка default и EXTRACT_API_KEY с тем же ключом — не ошибка', () => {
+    expect(loadConfig({ EXTRACT_API_KEYS: `mcp:${A},mcp:${B}` }).consumers).toHaveLength(2)
+    expect(() => loadConfig({ EXTRACT_API_KEY: A, EXTRACT_API_KEYS: `default:${A}` })).not.toThrow()
+    expect(() => loadConfig({ EXTRACT_API_KEY: A, EXTRACT_API_KEYS: `mcp:${A}` })).toThrow(ConfigError)
   })
 })

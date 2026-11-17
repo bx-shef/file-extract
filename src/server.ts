@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { checkBearer } from './auth.ts'
+import { authenticate } from './auth.ts'
 import { createMetrics, type Metrics } from './metrics.ts'
 import { cacheKey, type CacheStore } from './cache.ts'
 import { CACHE_TTL_SEC, EXTRACTOR_VERSION, type Config } from './config.ts'
@@ -156,7 +156,7 @@ export function createApp(deps: AppDeps): Server {
   const maxInflight = config.maxConcurrency + config.maxQueue
   let inflight = 0
 
-  interface Ctx { bytes?: number, queueMs?: number, shared?: boolean }
+  interface Ctx { bytes?: number, queueMs?: number, shared?: boolean, consumer?: string }
 
   // Одинаковые одновременные запросы (один ключ кеша) делят один разбор (single-flight, #35). Ждущие — те же запросы с
   // телом в памяти, уже посчитанные в inflight, поэтому число ждущих ограничено maxInflight и очередь не растёт.
@@ -247,9 +247,9 @@ export function createApp(deps: AppDeps): Server {
   }
 
   async function handleExtract(req: IncomingMessage, signal: AbortSignal, ctx: Ctx): Promise<ExtractResponse> {
-    if (!checkBearer(req.headers.authorization, config.apiKey)) {
-      throw new HttpError(401, 'unauthorized', 'неверный или отсутствующий ключ')
-    }
+    const consumer = authenticate(req.headers.authorization, config.consumers)
+    if (consumer === null) throw new HttpError(401, 'unauthorized', 'неверный или отсутствующий ключ')
+    ctx.consumer = consumer
     const fileName = fileNameFrom(req)
     const plan = planExtraction(fileName)
     if (plan.kind === 'unsupported') throw new HttpError(415, 'unsupported', 'неподдерживаемый формат файла')
@@ -271,7 +271,7 @@ export function createApp(deps: AppDeps): Server {
       if (body.length === 0) throw new HttpError(400, 'bad_request', 'пустое тело запроса')
       const sha = createHash('sha256').update(body).digest('hex')
       const vision = plan.kind === 'image' ? visionCacheKey(config.vision) : ''
-      const key = cacheKey({ sha, kind: plan.kind, ext: plan.ext, maxTextChars: config.maxTextChars, version: EXTRACTOR_VERSION, vision })
+      const key = cacheKey({ sha, kind: plan.kind, ext: plan.ext, maxTextChars: config.maxTextChars, version: EXTRACTOR_VERSION, vision, consumer })
 
       const hit = await cache.get(key).catch(() => null) // недоступный кеш — не повод отказать
       // испорченная запись кеша (обрыв записи на диск, чужое значение в Redis) — как промах, а не 500 на сутки
@@ -348,9 +348,9 @@ export function createApp(deps: AppDeps): Server {
 
   /** Сборка: те же ключ, очередь, таймаут и потолок одновременных тел, что у разбора. Без кеша. */
   async function handleConvert(req: IncomingMessage, query: string, signal: AbortSignal, ctx: Ctx): Promise<{ body: Buffer, mime: string }> {
-    if (!checkBearer(req.headers.authorization, config.apiKey)) {
-      throw new HttpError(401, 'unauthorized', 'неверный или отсутствующий ключ')
-    }
+    const consumer = authenticate(req.headers.authorization, config.consumers)
+    if (consumer === null) throw new HttpError(401, 'unauthorized', 'неверный или отсутствующий ключ')
+    ctx.consumer = consumer
     const target = convertTarget(new URLSearchParams(query).get('to') ?? '')
     if (!target) throw new HttpError(400, 'bad_request', 'параметр to: pdf или docx')
     if (!runners.htmlConvert) throw new HttpError(501, 'not_implemented', 'сборка документов не подключена')
@@ -440,7 +440,7 @@ export function createApp(deps: AppDeps): Server {
         status = m[0]; code = m[1]; message = e.message
       }
       metrics.request(evt === 'convert' ? 'convert' : 'extract', status)
-      log({ evt, kind, ms: now() - started, ...(ctx.queueMs !== undefined ? { queueMs: ctx.queueMs } : {}), ...(ctx.bytes !== undefined ? { bytes: ctx.bytes } : {}), error: code, ...(ctx.shared ? { shared: true } : {}), ...(status === 500 ? { errorClass: errorClassOf(e) } : {}) })
+      log({ evt, kind, ...(ctx.consumer !== undefined ? { consumer: ctx.consumer } : {}), ms: now() - started, ...(ctx.queueMs !== undefined ? { queueMs: ctx.queueMs } : {}), ...(ctx.bytes !== undefined ? { bytes: ctx.bytes } : {}), error: code, ...(ctx.shared ? { shared: true } : {}), ...(status === 500 ? { errorClass: errorClassOf(e) } : {}) })
       if (code === 'client_aborted' || res.destroyed) {
         req.destroy()
         return
@@ -462,7 +462,7 @@ export function createApp(deps: AppDeps): Server {
       res.on('close', () => { if (!res.writableFinished) gone.abort(clientAborted()) })
       handleConvert(req, query, gone.signal, ctx).then((out) => {
         metrics.request('convert', 200)
-        log({ evt: 'convert', kind: out.mime === 'application/pdf' ? 'pdf' : 'docx', ms: now() - started, bytes: ctx.bytes })
+        log({ evt: 'convert', kind: out.mime === 'application/pdf' ? 'pdf' : 'docx', ...(ctx.consumer !== undefined ? { consumer: ctx.consumer } : {}), ms: now() - started, bytes: ctx.bytes })
         if (res.destroyed) return
         res.writeHead(200, { 'content-type': out.mime, 'content-length': out.body.length, 'cache-control': 'no-store' })
         res.end(out.body)
@@ -481,7 +481,7 @@ export function createApp(deps: AppDeps): Server {
     }
     if (url === '/metrics') {
       if (req.method !== 'GET') { sendJson(res, 405, { error: 'method_not_allowed', message: 'нужен GET' }); return }
-      if (!checkBearer(req.headers.authorization, config.apiKey)) { sendJson(res, 401, { error: 'unauthorized', message: 'неверный или отсутствующий ключ' }); return }
+      if (authenticate(req.headers.authorization, config.consumers) === null) { sendJson(res, 401, { error: 'unauthorized', message: 'неверный или отсутствующий ключ' }); return }
       const text = metrics.render({ running: limiter.running, queued: limiter.queued, inflight, flights: flights.size })
       res.writeHead(200, { 'content-type': 'text/plain; version=0.0.4; charset=utf-8', 'content-length': Buffer.byteLength(text), 'cache-control': 'no-store' })
       res.end(text)
@@ -508,7 +508,7 @@ export function createApp(deps: AppDeps): Server {
     })
     handleExtract(req, gone.signal, ctx).then((out) => {
       metrics.request('extract', 200)
-      log({ evt: 'extract', kind: out.kind, ...timing(), sha: shortSha(out.sha256), cached: out.cached, ...(ctx.shared ? { shared: true } : {}) })
+      log({ evt: 'extract', kind: out.kind, ...(ctx.consumer !== undefined ? { consumer: ctx.consumer } : {}), ...timing(), sha: shortSha(out.sha256), cached: out.cached, ...(ctx.shared ? { shared: true } : {}) })
       if (!res.destroyed) sendJson(res, 200, out)
     }).catch((e: unknown) => replyError(e, 'extract', kind, started, ctx))
   })

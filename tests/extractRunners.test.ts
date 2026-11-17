@@ -98,10 +98,11 @@ describe('subprocessEnv (secret-free env for extraction binaries)', () => {
   it('passes only the allow-list, dropping backend secrets', () => {
     const out = subprocessEnv({
       PATH: '/usr/bin', HOME: '/root', LANG: 'C.UTF-8', OMP_THREAD_LIMIT: '2',
-      EXTRACT_API_KEY: 'secret-key', REDIS_URL: 'redis://secret', RANDOM: 'x'
+      EXTRACT_API_KEY: 'secret-key', EXTRACT_API_KEYS: 'a:secret-key-2', REDIS_URL: 'redis://secret', RANDOM: 'x'
     })
     expect(out).toEqual({ PATH: '/usr/bin', HOME: '/root', LANG: 'C.UTF-8', OMP_THREAD_LIMIT: '2' })
     expect(out.EXTRACT_API_KEY).toBeUndefined()
+    expect(out.EXTRACT_API_KEYS).toBeUndefined()
     expect(out.REDIS_URL).toBeUndefined()
   })
   it('skips empty/undefined values and applies extra overrides', () => {

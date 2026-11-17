@@ -7,14 +7,14 @@ import { CACHE_TTL_SEC, EXTRACTOR_VERSION } from '../src/config.ts'
 
 const SHA = 'a'.repeat(64)
 
-const base = { sha: SHA, kind: 'pdf', ext: 'pdf', maxTextChars: 100, version: '1', vision: '' }
+const base = { sha: SHA, kind: 'pdf', ext: 'pdf', maxTextChars: 100, version: '1', vision: '', consumer: 'default' }
 describe('cacheKey', () => {
   it('стабилен при тех же входах и меняется с каждым входом', () => {
     expect(cacheKey(base)).toBe(cacheKey({ ...base }))
     expect(cacheKey(base)).toMatch(/^[0-9a-f]{64}$/)
     const variants = [
       { version: '2' }, { kind: 'image' }, { sha: 'b'.repeat(64) }, { ext: 'doc' }, { maxTextChars: 101 },
-      { vision: 'vision:vision:v1:400' }
+      { vision: 'vision:vision:v1:400' }, { consumer: 'bank' }
     ]
     for (const v of variants) expect(cacheKey({ ...base, ...v })).not.toBe(cacheKey(base))
   })

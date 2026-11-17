@@ -1,6 +1,6 @@
 import * as crypto from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
-import { checkBearer } from '../src/auth.ts'
+import { authenticate, checkBearer } from '../src/auth.ts'
 
 const KEY = 'k'.repeat(32)
 
@@ -31,5 +31,23 @@ describe('сравнение за постоянное время', () => {
     expect(spy).toHaveBeenCalledTimes(1)
     const [a, b] = spy.mock.calls[0] as [Buffer, Buffer]
     expect(a.length).toBe(b.length)
+  })
+})
+
+describe('authenticate: ключи потребителей', () => {
+  const cs = [{ label: 'mcp', key: 'm'.repeat(20) }, { label: 'bank', key: 'b'.repeat(20) }]
+  it('возвращает метку своего ключа', () => {
+    expect(authenticate(`Bearer ${'m'.repeat(20)}`, cs)).toBe('mcp')
+    expect(authenticate(`Bearer ${'b'.repeat(20)}`, cs)).toBe('bank')
+  })
+  it('чужой, пустой и без схемы — null; пустой список не пускает никого', () => {
+    expect(authenticate(`Bearer ${'x'.repeat(20)}`, cs)).toBeNull()
+    expect(authenticate('Bearer ', cs)).toBeNull()
+    expect(authenticate(undefined, cs)).toBeNull()
+    expect(authenticate(`Bearer ${'m'.repeat(20)}`, [])).toBeNull()
+    expect(authenticate('Bearer x', [{ label: 'e', key: '' }])).toBeNull()
+  })
+  it('метка с ключом без совпадений по префиксу: ключ-префикс не проходит', () => {
+    expect(authenticate(`Bearer ${'m'.repeat(19)}`, cs)).toBeNull()
   })
 })
