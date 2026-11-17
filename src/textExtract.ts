@@ -40,6 +40,8 @@ export interface ExtractRunners {
   ocr: (path: string, signal: AbortSignal) => Promise<OcrOutput>
   /** HTML → PDF или DOCX через LibreOffice Writer (сборка документов: КП помощника). */
   htmlConvert?: (path: string, to: ConvertTo, signal: AbortSignal) => Promise<Buffer>
+  /** Готовность: все программы разбора на месте (для /health). Нет — считается, что готовы. */
+  programs?: () => Promise<boolean>
 }
 
 export type ConvertTo = 'pdf' | 'docx'

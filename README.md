@@ -1,6 +1,6 @@
 # file-extract — сервис разбора файлов
 
-> Last reviewed: 2026-11-16
+> Last reviewed: 2026-11-17
 
 Внутренний сервис: получает файл и возвращает его текст, а для таблиц — ещё и каждый лист
 отдельным CSV. Им пользуются другие сервисы линейки (toolsai-mcp, позже импорт прайсов и
@@ -95,7 +95,21 @@ curl -s -X POST http://file-extract:3000/v1/extract \
 
 ### `GET /health`
 
-`200 {"ok": true, "version": "<версия разборщика>"}`, без ключа.
+Без ключа. `200 {"ok": true, "version": "<версия разборщика>", "ready": true, "checks": {"programs": true, "cache": true}}`.
+Главное — живость: ответ 200 и `version` как раньше (healthcheck образа ничего не потеряет). `ready` — готовность:
+`programs` — pdftotext, pdftoppm, libreoffice, tesseract есть в PATH и исполняемы (запуска нет); `cache` — каталог
+кеша доступен на запись или Redis отвечает (проверки — не дольше 2 с). Недоступный кеш разбор не останавливает
+(файлы разбираются без кеша), но `ready` становится `false`. `GET /health?ready=1` — то же тело, но при `ready: false`
+код 503: для проверок оркестратора. В теле только логические значения — путей и версий программ нет.
+
+### `GET /metrics`
+
+Нужен тот же ключ (`Authorization: Bearer`), что и разбору; без него — 401. Числа несекретны, но по ним видна нагрузка и
+«такой файл уже присылали» (попадания кеша), поэтому открытым адрес не делаем. Текст Prometheus: `file_extract_requests_total{route,status}`
+(503 — занят, 504 — не уложился, 499 — клиент ушёл), `file_extract_cache_hits_total`/`_misses_total` (доля попаданий =
+hits / (hits + misses)), `file_extract_queue_depth`, `file_extract_slots_running`, `file_extract_bodies_inflight`,
+`file_extract_memory_rss_bytes`, `file_extract_memory_peak_rss_bytes` (пик с запуска). Счётчики — с запуска процесса.
+Имён файлов, текста и ключей в метках нет. Prometheus: `authorization: { credentials_file: … }` в `scrape_config`.
 
 ### POST /v1/convert?to=pdf|docx — сборка документа
 

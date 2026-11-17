@@ -951,3 +951,74 @@ describe('HTTP: одинаковые одновременные запросы (
     expect((await b).status).toBe(200)
   })
 })
+
+
+describe('HTTP: готовность и метрики (#38)', () => {
+  it('/health: 200, version как прежде, плюс ready и checks; без ключа', async () => {
+    const { base } = await start()
+    const j = await (await fetch(`${base}/health`)).json() as any
+    expect(j).toEqual({ ok: true, version: EXTRACTOR_VERSION, ready: true, checks: { programs: true, cache: true } })
+  })
+  it('нет программ: /health всё равно 200 (живость), ready=false; ?ready=1 — 503', async () => {
+    const { base } = await start({ runners: fakeRunners({ programs: async () => false }) })
+    const r = await fetch(`${base}/health`)
+    expect(r.status).toBe(200)
+    expect(await r.json()).toMatchObject({ ready: false, checks: { programs: false, cache: true } })
+    expect((await fetch(`${base}/health?ready=1`)).status).toBe(503)
+  })
+  it('кеш недоступен — ready=false, но разбор работает (без кеша)', async () => {
+    const cache = { ...memCache(), ping: async () => false }
+    const { base, extract } = await start({ cache })
+    expect(await (await fetch(`${base}/health`)).json()).toMatchObject({ ready: false, checks: { cache: false } })
+    expect((await extract('x', 'a.txt')).status).toBe(200)
+  })
+  it('зависшая проверка не вешает /health: через потолок — false', async () => {
+    const cache = { ...memCache(), ping: () => new Promise<boolean>(() => {}) }
+    const { base } = await start({ cache })
+    const started = Date.now()
+    expect(await (await fetch(`${base}/health`)).json()).toMatchObject({ checks: { cache: false } })
+    expect(Date.now() - started).toBeLessThan(4000)
+  }, 8000)
+  it('/health делит проверку между запросами: поток запросов — одна проверка', async () => {
+    const ping = vi.fn(async () => true)
+    const { base } = await start({ cache: { ...memCache(), ping } })
+    await Promise.all(Array.from({ length: 10 }, () => fetch(`${base}/health`).then(r => r.json())))
+    expect(ping).toHaveBeenCalledTimes(1)
+  })
+  it('/metrics: одинаковые одновременные запросы — shared_total и flights', async () => {
+    const { base, extract } = await start({ runners: fakeRunners({ readText: () => new Promise(r => setTimeout(() => r('достаточно длинный читаемый текст'), 150)) }) })
+    const a = extract('один и тот же', 'a.txt')
+    await new Promise(r => setTimeout(r, 40))
+    const t1 = await (await fetch(`${base}/metrics`, { headers: { authorization: `Bearer ${KEY}` } })).text()
+    expect(t1).toContain('file_extract_flights 1')
+    const b = extract('один и тот же', 'a.txt')
+    await Promise.all([a, b])
+    const t2 = await (await fetch(`${base}/metrics`, { headers: { authorization: `Bearer ${KEY}` } })).text()
+    expect(t2).toContain('file_extract_shared_total 1')
+    expect(t2).toContain('file_extract_flights 0')
+  })
+  it('/metrics без ключа — 401, с неверным — 401; только GET', async () => {
+    const { base } = await start()
+    expect((await fetch(`${base}/metrics`)).status).toBe(401)
+    expect((await fetch(`${base}/metrics`, { headers: { authorization: 'Bearer wrong-wrong-wrong-1' } })).status).toBe(401)
+    expect((await fetch(`${base}/metrics`, { method: 'POST', headers: { authorization: `Bearer ${KEY}` } })).status).toBe(405)
+  })
+  it('/metrics: статусы, попадания и промахи кеша, 503; имён файлов и ключей в тексте нет', async () => {
+    const { base, extract } = await start({ config: { maxConcurrency: 1, maxQueue: 0 }, runners: fakeRunners({ readText: () => new Promise(r => setTimeout(() => r('достаточно длинный читаемый текст'), 150)) }) })
+    await extract('секрет', 'Паспорт Иванова.txt') // промах
+    await extract('секрет', 'Паспорт Иванова.txt') // попадание
+    await extract('x', 'a.exe') // 415
+    const slow = extract('другое', 'b.txt')
+    await new Promise(r => setTimeout(r, 40))
+    expect((await extract('третье', 'c.txt')).status).toBe(503)
+    await slow
+    const t = await (await fetch(`${base}/metrics`, { headers: { authorization: `Bearer ${KEY}` } })).text()
+    expect(t).toContain('file_extract_requests_total{route="extract",status="200"} 3')
+    expect(t).toContain('file_extract_requests_total{route="extract",status="415"} 1')
+    expect(t).toContain('file_extract_requests_total{route="extract",status="503"} 1')
+    expect(t).toContain('file_extract_cache_hits_total 1')
+    expect(t).toMatch(/file_extract_cache_misses_total [2-9]/)
+    expect(t).not.toContain('Иванов')
+    expect(t).not.toContain(KEY)
+  })
+})

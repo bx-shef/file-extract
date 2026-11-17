@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
-import { mkdir, mkdtemp, open, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { constants } from 'node:fs'
+import { access, mkdir, mkdtemp, open, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import { ExtractError } from './errors.ts'
@@ -416,7 +417,28 @@ async function htmlConvert(path: string, to: ConvertTo, signal: AbortSignal): Pr
   }
 }
 
+/** Программы, без которых разбор не работает (имена — как в run()). */
+export const REQUIRED_PROGRAMS = ['pdftotext', 'pdftoppm', 'libreoffice', 'tesseract'] as const
+
+/** Все ли программы есть в PATH и исполняемы. Без запуска: libreoffice --version тяжёл (создаёт профиль). */
+export async function programsAvailable(env: Record<string, string | undefined> = process.env): Promise<boolean> {
+  const dirs = (env.PATH ?? '').split(process.platform === 'win32' ? ';' : ':').filter(Boolean)
+  for (const p of REQUIRED_PROGRAMS) {
+    let found = false
+    for (const d of dirs) {
+      try {
+        await access(join(d, p), constants.X_OK)
+        found = true
+        break
+      } catch { /* не здесь */ }
+    }
+    if (!found) return false
+  }
+  return true
+}
+
 export const liveExtractRunners: ExtractRunners = {
+  programs: () => programsAvailable(),
   htmlConvert,
   readText: decodeText,
   pdfToText: (path, signal) => run('pdftotext', ['-layout', '-enc', 'UTF-8', '-l', String(MAX_PDF_TEXT_PAGES), path, '-'], signal, { dir: dirname(path) }),

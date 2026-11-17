@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
-import { mkdir, readdir, readFile, rename, rm, stat, utimes, writeFile } from 'node:fs/promises'
+import { constants } from 'node:fs'
+import { access, mkdir, readdir, readFile, rename, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { CACHE_TTL_SEC } from './config.ts'
 
@@ -14,6 +15,8 @@ export interface CacheStore {
   /** Удалить просроченное; вернуть число удалённых. Redis делает это сам → 0. */
   sweep: () => Promise<number>
   close?: () => Promise<void>
+  /** Кеш пригоден: каталог доступен на запись / Redis отвечает (для /health). Нет метода — пригоден. */
+  ping?: () => Promise<boolean>
 }
 
 export interface CacheKeyInput {
@@ -107,6 +110,13 @@ export function diskCache(dir: string, opts: DiskCacheOptions = {}): CacheStore 
   }
 
   return {
+    async ping() {
+      try {
+        await ensure()
+        await access(dir, constants.W_OK)
+        return true
+      } catch { return false }
+    },
     async get(key) {
       const f = file(key)
       try {
@@ -167,6 +177,8 @@ export interface RedisLike {
 /** Кеш в Redis: срок держит сам Redis (`SET … EX`). */
 export function redisCache(client: RedisLike, prefix = 'file-extract:'): CacheStore {
   return {
+    // Готовность: чтение несуществующего ключа доходит до Redis и возвращается (недоступный — ошибка за maxRetriesPerRequest).
+    ping: () => client.get(prefix + 'ready').then(() => true, () => false),
     get: key => client.get(prefix + key),
     async set(key, value, ttlSec) {
       await client.set(prefix + key, value, 'EX', clampTtl(ttlSec))
