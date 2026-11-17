@@ -1,6 +1,6 @@
 # CLAUDE.md — file-extract
 
-> Last reviewed: 2026-11-16
+> Last reviewed: 2026-11-17
 
 Внутренний сервис разбора файлов: файл → текст и листы таблиц. Голый `node:http`, Node 22,
 TypeScript запускается через `node --experimental-strip-types` (сборки нет), тесты — vitest.
@@ -27,7 +27,7 @@ docker build -t file-extract .
 | `src/vision.ts` | зрение: описание картинки сервисом toolsai-vision — `createDescriber` (исход `{ description } \| { failure }`, своя очередь `Limiter(1)`, формат по байтам `VISION_FORMATS` и `MAX_IMAGE_PIXELS` до запроса, ответ не больше `MAX_RESPONSE_BYTES`), `parseDescription` (C0/C1 и bidi вон, `cutText`), `composeImageText`, `visionCacheKey`, `visionCacheable`, `VISION_PROMPT_VERSION`; сбой — `vision_failed` в журнал |
 | `src/imageSize.ts` | размеры картинки по заголовку (PNG/JPEG/TIFF/BMP/WEBP), формат по сигнатуре `imageFormat`, `MAX_IMAGE_PIXELS` |
 | `src/textSanitize.ts` | `sanitizeExtractedText`, порог читаемости `MIN_READABLE_CHARS` |
-| `src/server.ts` | HTTP `POST /v1/extract` (`EXTRACT_PATH`), `POST /v1/convert` (`CONVERT_PATH`, HTML → PDF/DOCX без кеша) и `GET /health` (версия разборщика): авторизация, лимит размера, место для тела, кеш, очередь (`extractInSlot` — место отдаётся сразу после разбора), зрение у картинок параллельно, таймаут, уход клиента, временный каталог, коды ошибок |
+| `src/server.ts` | HTTP `POST /v1/extract` (`EXTRACT_PATH`), `POST /v1/convert` (`CONVERT_PATH`, HTML → PDF/DOCX без кеша) и `GET /health` (версия разборщика): авторизация, лимит размера, место для тела, кеш, single-flight по ключу кеша (`startFlight`/`awaitFlight`), очередь (`extractInSlot` — место отдаётся сразу после разбора), зрение у картинок параллельно, таймаут, уход клиента, временный каталог, коды ошибок |
 | `src/htmlGuard.ts` | проверка и пересборка HTML для `/v1/convert`: `checkHtml` (линейный сканер тегов с кавычками; `<style>` — сырой текст без «<»; `data:image` по сигнатуре PNG/JPEG/GIF и размерам, `MAX_IMAGE_PIXELS` на документ; `<a>` и `href` — текстом), `unsafeHtml`, `normalizeHtml`; тесты — `tests/htmlGuard.test.ts`, байты картинок — `tests/imageFixtures.ts` |
 | `src/cache.ts` | ключ кеша (версия, способ, расширение, потолок текста, зрение у картинок, sha), хранилища на диске (с потолком размера) и в Redis (порт `CacheStore`) |
 | `src/limiter.ts`, `src/truncate.ts`, `src/auth.ts`, `src/config.ts`, `src/log.ts`, `src/errors.ts` | очередь, потолок текста, ключ, настройки (`loadConfig`, `CACHE_TTL_SEC`, `MIN_API_KEY_LENGTH`) и `EXTRACTOR_VERSION`, журнал, коды ошибок |

@@ -125,6 +125,9 @@ function safeParse(raw: string): Omit<ExtractResponse, 'cached'> | null {
   } catch { return null }
 }
 
+/** Сколько общий разбор ждёт записи в кеш, прежде чем отдать ответ. */
+const CACHE_SET_WAIT_MS = 5_000
+
 /** Адрес разбора. Версия в пути — чтобы менять ответ, не ломая старых клиентов. */
 export const EXTRACT_PATH = '/v1/extract'
 
@@ -147,7 +150,51 @@ export function createApp(deps: AppDeps): Server {
   const maxInflight = config.maxConcurrency + config.maxQueue
   let inflight = 0
 
-  interface Ctx { bytes?: number, queueMs?: number }
+  interface Ctx { bytes?: number, queueMs?: number, shared?: boolean }
+
+  // Одинаковые одновременные запросы (один ключ кеша) делят один разбор (single-flight, #35). Ждущие — те же запросы с
+  // телом в памяти, уже посчитанные в inflight, поэтому число ждущих ограничено maxInflight и очередь не растёт.
+  // Ключ кеша включает версию, способ, потолок и зрение — разбор для всех ждущих даёт один и тот же ответ.
+  interface Flight { p: Promise<Omit<ExtractResponse, 'cached'>>, ac: AbortController, refs: number, key: string }
+  const flights = new Map<string, Flight>()
+
+  /** Начать разбор под ключом; сам разбор живёт, пока в нём есть хоть один ждущий (см. awaitFlight). */
+  function startFlight(key: string, run: (signal: AbortSignal) => Promise<Omit<ExtractResponse, 'cached'>>): Flight {
+    const ac = new AbortController()
+    const flight: Flight = { p: undefined as never, ac, refs: 0, key }
+    flight.p = Promise.resolve().then(() => run(ac.signal)).finally(() => {
+      if (flights.get(key) === flight) flights.delete(key)
+    })
+    flight.p.catch(() => {}) // все ждущие могли уйти: отказ без слушателя не должен ронять процесс
+    flights.set(key, flight)
+    return flight
+  }
+
+  /**
+   * Ждать итог разбора. Итог — один для всех: и успех, и отказ (разбор одного файла детерминирован, а 503/504 значат
+   * «сервис занят/не успел» — повтор на тех же байтах сразу ничего не даст). Ушёл клиент — его ожидание кончается
+   * (499 только ему); когда ушли все, разбор отменяется и из таблицы убирается, чтобы новый запрос начал свежий.
+   */
+  async function awaitFlight(flight: Flight, signal: AbortSignal): Promise<Omit<ExtractResponse, 'cached'>> {
+    flight.refs++
+    let onAbort: (() => void) | undefined
+    try {
+      if (signal.aborted) throw clientAborted()
+      return await Promise.race([
+        flight.p,
+        new Promise<never>((_, reject) => {
+          onAbort = () => reject(clientAborted())
+          signal.addEventListener('abort', onAbort, { once: true })
+        })
+      ])
+    } finally {
+      if (onAbort) signal.removeEventListener('abort', onAbort)
+      if (--flight.refs === 0) {
+        if (flights.get(flight.key) === flight) flights.delete(flight.key)
+        flight.ac.abort(clientAborted())
+      }
+    }
+  }
 
   /**
    * Разбор в месте очереди: ждём место, пишем тело во временный каталог, зовём программы разбора с
@@ -225,55 +272,67 @@ export function createApp(deps: AppDeps): Server {
       const parsed = hit ? safeParse(hit) : null
       if (parsed) return { ...parsed, cached: true }
 
+      // Сам разбор — один на всех, кто прислал тот же файл (тот же ключ кеша). signal — отмена, когда ушли ВСЕ ждущие.
       // Зрение — с получением места разбора (не дали места — зрение не начинается), параллельно с OCR и своим
-      // местом: место разбора оно не держит. Конец запроса (ответ, ошибка, уход клиента) — отмена зрения.
-      const visionAc = new AbortController()
-      const stopVision = (): void => visionAc.abort()
-      signal.addEventListener('abort', stopVision, { once: true })
-      const seen: { p: Promise<VisionOutcome> | null } = { p: null }
-      // Описатель не бросает; на всякий случай — синхронное исключение и отказ промиса тоже становятся сбоем зрения
-      const startVision = plan.kind === 'image' && describe
-        ? (): void => { seen.p = Promise.resolve().then(() => describe(body, visionAc.signal)).catch((): VisionOutcome => ({ failure: 'network' })) }
-        : undefined
-      try {
-        let r: ExtractResult
+      // местом: место разбора оно не держит. Конец разбора (итог, ошибка, уход всех ждущих) — отмена зрения.
+      const compute = async (signal: AbortSignal): Promise<Omit<ExtractResponse, 'cached'>> => {
+        const visionAc = new AbortController()
+        const stopVision = (): void => visionAc.abort()
+        signal.addEventListener('abort', stopVision, { once: true })
+        const seen: { p: Promise<VisionOutcome> | null } = { p: null }
+        // Описатель не бросает; на всякий случай — синхронное исключение и отказ промиса тоже становятся сбоем зрения
+        const startVision = plan.kind === 'image' && describe
+          ? (): void => { seen.p = Promise.resolve().then(() => describe(body, visionAc.signal)).catch((): VisionOutcome => ({ failure: 'network' })) }
+          : undefined
         try {
-          r = await extractInSlot(body, fileName, plan.ext, signal, ctx, startVision)
-        } catch (e) {
-          // Картинка без читаемого текста: зрение ещё может её описать — ждём его, а не отказываем сразу
-          if (!(seen.p && e instanceof ExtractError && e.code === 'unreadable')) throw e
-          letGo()
-          const v = await seen.p
-          if (!('description' in v)) {
-            // Временный сбой зрения (занято, таймаут, сеть, 5xx, 429) — 503: потребитель повторит, а не скажет «нет текста»
-            if (visionRetryable(v)) throw new HttpError(503, 'busy', 'сервис занят, повторите позже')
-            throw e
+          let r: ExtractResult
+          try {
+            r = await extractInSlot(body, fileName, plan.ext, signal, ctx, startVision)
+          } catch (e) {
+            // Картинка без читаемого текста: зрение ещё может её описать — ждём его, а не отказываем сразу
+            if (!(seen.p && e instanceof ExtractError && e.code === 'unreadable')) throw e
+            letGo()
+            const v = await seen.p
+            if (!('description' in v)) {
+              // Временный сбой зрения (занято, таймаут, сеть, 5xx, 429) — 503: потребитель повторит, а не скажет «нет текста»
+              if (visionRetryable(v)) throw new HttpError(503, 'busy', 'сервис занят, повторите позже')
+              throw e
+            }
+            r = { kind: 'image', text: '', sheets: [], ocr: true }
           }
-          r = { kind: 'image', text: '', sheets: [], ocr: true }
+          letGo()
+          const outcome = seen.p ? await seen.p : null
+          const description = outcome && 'description' in outcome ? outcome.description : undefined
+          const lim = applyTextLimit(description ? composeImageText(description, r.text) : r.text, r.sheets, config.maxTextChars)
+          const out: Omit<ExtractResponse, 'cached'> = {
+            text: lim.text,
+            sheets: lim.sheets,
+            ocr: r.ocr,
+            truncated: lim.truncated,
+            ...(r.pages !== undefined ? { pages: r.pages } : {}),
+            ...(description !== undefined ? { description } : {}),
+            kind: r.kind,
+            sha256: sha,
+            extractorVersion: EXTRACTOR_VERSION
+          }
+          // Кешируется только успех; у картинки — и только окончательный итог зрения: таймаут, сеть или
+          // «занято» на сутки не запоминаем. Сбой записи кеша ответ не портит.
+          // Запись ждём недолго: зависший Redis не должен держать общий разбор, а с ним и всех ждущих.
+          if (visionCacheable(outcome)) await Promise.race([cache.set(key, JSON.stringify(out), CACHE_TTL_SEC).catch(() => {}), new Promise<void>(r => setTimeout(r, CACHE_SET_WAIT_MS).unref())])
+          return out
+        } finally {
+          visionAc.abort()
+          signal.removeEventListener('abort', stopVision)
         }
-        letGo()
-        const outcome = seen.p ? await seen.p : null
-        const description = outcome && 'description' in outcome ? outcome.description : undefined
-        const lim = applyTextLimit(description ? composeImageText(description, r.text) : r.text, r.sheets, config.maxTextChars)
-        const out: Omit<ExtractResponse, 'cached'> = {
-          text: lim.text,
-          sheets: lim.sheets,
-          ocr: r.ocr,
-          truncated: lim.truncated,
-          ...(r.pages !== undefined ? { pages: r.pages } : {}),
-          ...(description !== undefined ? { description } : {}),
-          kind: r.kind,
-          sha256: sha,
-          extractorVersion: EXTRACTOR_VERSION
-        }
-        // Кешируется только успех; у картинки — и только окончательный итог зрения: таймаут, сеть или
-        // «занято» на сутки не запоминаем. Сбой записи кеша ответ не портит.
-        if (visionCacheable(outcome)) await cache.set(key, JSON.stringify(out), CACHE_TTL_SEC).catch(() => {})
-        return { ...out, cached: false }
-      } finally {
-        visionAc.abort()
-        signal.removeEventListener('abort', stopVision)
       }
+
+      // Одинаковый файл уже разбирается — ждём его итог, а не запускаем OCR второй раз.
+      const running = flights.get(key)
+      if (running) {
+        ctx.shared = true
+        return { ...(await awaitFlight(running, signal)), cached: false }
+      }
+      return { ...(await awaitFlight(startFlight(key, compute), signal)), cached: false }
     } finally {
       letGo()
     }
@@ -354,7 +413,7 @@ export function createApp(deps: AppDeps): Server {
         const m = EXTRACT_STATUS[e.code]
         status = m[0]; code = m[1]; message = e.message
       }
-      log({ evt, kind, ms: now() - started, ...(ctx.queueMs !== undefined ? { queueMs: ctx.queueMs } : {}), ...(ctx.bytes !== undefined ? { bytes: ctx.bytes } : {}), error: code, ...(status === 500 ? { errorClass: errorClassOf(e) } : {}) })
+      log({ evt, kind, ms: now() - started, ...(ctx.queueMs !== undefined ? { queueMs: ctx.queueMs } : {}), ...(ctx.bytes !== undefined ? { bytes: ctx.bytes } : {}), error: code, ...(ctx.shared ? { shared: true } : {}), ...(status === 500 ? { errorClass: errorClassOf(e) } : {}) })
       if (code === 'client_aborted' || res.destroyed) {
         req.destroy()
         return
@@ -407,7 +466,7 @@ export function createApp(deps: AppDeps): Server {
       ...(ctx.bytes !== undefined ? { bytes: ctx.bytes } : {})
     })
     handleExtract(req, gone.signal, ctx).then((out) => {
-      log({ evt: 'extract', kind: out.kind, ...timing(), sha: shortSha(out.sha256), cached: out.cached })
+      log({ evt: 'extract', kind: out.kind, ...timing(), sha: shortSha(out.sha256), cached: out.cached, ...(ctx.shared ? { shared: true } : {}) })
       if (!res.destroyed) sendJson(res, 200, out)
     }).catch((e: unknown) => replyError(e, 'extract', kind, started, ctx))
   })

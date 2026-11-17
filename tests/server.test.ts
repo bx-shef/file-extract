@@ -830,3 +830,124 @@ describe('HTTP: POST /v1/convert', () => {
     })
   })
 })
+
+describe('HTTP: одинаковые одновременные запросы (single-flight, #35)', () => {
+  /** Разбор, который держится, пока не позовут open(): так видно, что второй запрос не запустил свой. */
+  function gated() {
+    const opens: Array<(v: string) => void> = []
+    const fails: Array<(e: Error) => void> = []
+    let aborted = 0
+    const readText = vi.fn((_p: string, signal: AbortSignal) => new Promise<string>((resolve, reject) => {
+      opens.push(resolve)
+      fails.push(reject)
+      signal.addEventListener('abort', () => { aborted++; reject(new ExtractError('timeout', 't')) })
+    }))
+    return { readText, open: (v: string) => opens.forEach(o => o(v)), fail: (e: Error) => fails.forEach(f => f(e)), aborted: () => aborted }
+  }
+  const start2 = (g: ReturnType<typeof gated>, config: Partial<Config> = {}, logs: LogEntry[] = []) =>
+    start({ runners: fakeRunners({ readText: g.readText as any }), config, logs })
+
+  it('второй запрос с тем же файлом ждёт первого: разбор один, оба получают текст', async () => {
+    const g = gated()
+    const logs: LogEntry[] = []
+    const { extract } = await start2(g, {}, logs)
+    const a = extract('тот же файл', 'a.txt')
+    await vi.waitFor(() => expect(g.readText).toHaveBeenCalledTimes(1))
+    const b = extract('тот же файл', 'другое.txt')
+    await new Promise(r => setTimeout(r, 50))
+    expect(g.readText).toHaveBeenCalledTimes(1)
+    g.open('результат')
+    const [ja, jb] = await Promise.all([a.then(r => r.json()), b.then(r => r.json())]) as any[]
+    expect(ja.text).toBe('результат')
+    expect(jb).toMatchObject({ text: 'результат', cached: false, sha256: ja.sha256 })
+    expect(g.readText).toHaveBeenCalledTimes(1)
+    expect(logs.filter(l => l.evt === 'extract' && l.shared)).toHaveLength(1)
+  })
+
+  it('разные файлы не склеиваются: у каждого свой разбор', async () => {
+    const g = gated()
+    const { extract } = await start2(g)
+    const a = extract('один', 'a.txt')
+    const b = extract('два', 'b.txt')
+    await vi.waitFor(() => expect(g.readText).toHaveBeenCalledTimes(2))
+    g.open('достаточно длинный читаемый текст')
+    await Promise.all([a, b])
+  })
+
+  it('отказ первого — тот же отказ ждущему (не повторный OCR), следующий запрос начинает заново', async () => {
+    const g = gated()
+    const { extract } = await start2(g)
+    const a = extract('f', 'a.txt')
+    await vi.waitFor(() => expect(g.readText).toHaveBeenCalledTimes(1))
+    const b = extract('f', 'a.txt')
+    await new Promise(r => setTimeout(r, 50))
+    g.fail(new ExtractError('unreadable', 'нет текста'))
+    expect((await a).status).toBe(422)
+    expect((await b).status).toBe(422)
+    expect(g.readText).toHaveBeenCalledTimes(1)
+    const c = extract('f', 'a.txt') // неудача не кешируется и не залипает в таблице
+    await vi.waitFor(() => expect(g.readText).toHaveBeenCalledTimes(2))
+    g.open('достаточно длинный читаемый текст')
+    expect((await c).status).toBe(200)
+  })
+
+  it('первый клиент ушёл, а ждущий остался — разбор не прерывается, ждущий получает ответ', async () => {
+    const g = gated()
+    const { extract, base } = await start2(g)
+    const ac = new AbortController()
+    const a = fetch(`${base}/v1/extract`, { method: 'POST', headers: { 'x-file-name': 'a.txt', authorization: `Bearer ${KEY}` }, body: 'f', signal: ac.signal }).catch(() => null)
+    await vi.waitFor(() => expect(g.readText).toHaveBeenCalledTimes(1))
+    const b = extract('f', 'a.txt')
+    await new Promise(r => setTimeout(r, 50))
+    ac.abort()
+    await a
+    await new Promise(r => setTimeout(r, 50))
+    expect(g.aborted()).toBe(0)
+    g.open('для второго')
+    expect(await (await b).json()).toMatchObject({ text: 'для второго' })
+  })
+
+  it('ушёл ждущий, а начавший остался — разбор идёт, начавший получает ответ', async () => {
+    const g = gated()
+    const { extract, base } = await start2(g)
+    const a = extract('f', 'a.txt')
+    await vi.waitFor(() => expect(g.readText).toHaveBeenCalledTimes(1))
+    const ac = new AbortController()
+    const b = fetch(`${base}/v1/extract`, { method: 'POST', headers: { 'x-file-name': 'a.txt', authorization: `Bearer ${KEY}` }, body: 'f', signal: ac.signal }).catch(() => null)
+    await new Promise(r => setTimeout(r, 50))
+    ac.abort()
+    await b
+    await new Promise(r => setTimeout(r, 50))
+    expect(g.aborted()).toBe(0)
+    g.open('достаточно длинный читаемый текст')
+    expect((await a).status).toBe(200)
+  })
+
+  it('ушли все — разбор прерывается, и новый запрос начинает свежий', async () => {
+    const g = gated()
+    const { base, extract } = await start2(g)
+    const ac = new AbortController()
+    const a = fetch(`${base}/v1/extract`, { method: 'POST', headers: { 'x-file-name': 'a.txt', authorization: `Bearer ${KEY}` }, body: 'f', signal: ac.signal }).catch(() => null)
+    await vi.waitFor(() => expect(g.readText).toHaveBeenCalledTimes(1))
+    ac.abort()
+    await a
+    await vi.waitFor(() => expect(g.aborted()).toBe(1))
+    const c = extract('f', 'a.txt')
+    await vi.waitFor(() => expect(g.readText).toHaveBeenCalledTimes(2))
+    g.open('свежий')
+    expect(await (await c).json()).toMatchObject({ text: 'свежий' })
+  })
+
+  it('ждущие не обходят потолок тел в памяти: сверх maxConcurrency+MAX_QUEUE — 503', async () => {
+    const g = gated()
+    const { extract } = await start2(g, { maxConcurrency: 1, maxQueue: 1 })
+    const a = extract('f', 'a.txt')
+    await vi.waitFor(() => expect(g.readText).toHaveBeenCalledTimes(1))
+    const b = extract('f', 'a.txt')
+    await new Promise(r => setTimeout(r, 50))
+    expect((await extract('f', 'a.txt')).status).toBe(503)
+    g.open('достаточно длинный читаемый текст')
+    expect((await a).status).toBe(200)
+    expect((await b).status).toBe(200)
+  })
+})
