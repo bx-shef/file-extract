@@ -310,7 +310,7 @@ docker run --rm --network none --memory 1536m --cpus 1 --pids-limit 256 \
 
 ## Состояние и план
 
-Текущая версия — 0.3.0 (картинка → текст и описание, сборка документа HTML → PDF/DOCX). Замеры нагрузки — [docs/dev/MEASUREMENTS.md](docs/dev/MEASUREMENTS.md). Открытая задача — [#3](https://github.com/bx-shef/file-extract/issues/3): замеры на ВМ, одинаковые запросы, ключи потребителей, сканирование образа, метрики. Изменения — в [CHANGELOG.md](CHANGELOG.md).
+Текущая версия — 0.4.0 (общий разбор одинаковых запросов, ключи потребителей, метрики и готовность, сканирование образа; 0.3.0 — картинка → текст и описание, сборка документа HTML → PDF/DOCX). Замеры нагрузки — [docs/dev/MEASUREMENTS.md](docs/dev/MEASUREMENTS.md). Открытая задача — [#3](https://github.com/bx-shef/file-extract/issues/3): замеры на ВМ, одинаковые запросы, ключи потребителей, сканирование образа, метрики. Изменения — в [CHANGELOG.md](CHANGELOG.md).
 
 ## Запуск
 
