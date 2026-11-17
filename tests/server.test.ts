@@ -949,6 +949,9 @@ describe('HTTP: одинаковые одновременные запросы (
     g.open('достаточно длинный читаемый текст')
     expect((await a).status).toBe(200)
     expect((await b).status).toBe(200)
+  })
+})
+
 
 describe('HTTP: готовность и метрики (#38)', () => {
   it('/health: 200, version как прежде, плюс ready и checks; без ключа', async () => {
@@ -981,6 +984,18 @@ describe('HTTP: готовность и метрики (#38)', () => {
     const { base } = await start({ cache: { ...memCache(), ping } })
     await Promise.all(Array.from({ length: 10 }, () => fetch(`${base}/health`).then(r => r.json())))
     expect(ping).toHaveBeenCalledTimes(1)
+  })
+  it('/metrics: одинаковые одновременные запросы — shared_total и flights', async () => {
+    const { base, extract } = await start({ runners: fakeRunners({ readText: () => new Promise(r => setTimeout(() => r('достаточно длинный читаемый текст'), 150)) }) })
+    const a = extract('один и тот же', 'a.txt')
+    await new Promise(r => setTimeout(r, 40))
+    const t1 = await (await fetch(`${base}/metrics`, { headers: { authorization: `Bearer ${KEY}` } })).text()
+    expect(t1).toContain('file_extract_flights 1')
+    const b = extract('один и тот же', 'a.txt')
+    await Promise.all([a, b])
+    const t2 = await (await fetch(`${base}/metrics`, { headers: { authorization: `Bearer ${KEY}` } })).text()
+    expect(t2).toContain('file_extract_shared_total 1')
+    expect(t2).toContain('file_extract_flights 0')
   })
   it('/metrics без ключа — 401, с неверным — 401; только GET', async () => {
     const { base } = await start()

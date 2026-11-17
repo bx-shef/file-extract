@@ -48,7 +48,7 @@ describe('готовность: программы и кеш', () => {
     try {
       for (const p of ['pdftotext', 'pdftoppm', 'libreoffice', 'tesseract']) await writeFile(join(dir, p), '#!/bin/sh', { mode: 0o755 })
       const sep = process.platform === 'win32' ? ';' : ':'
-      expect(await programsAvailable({ PATH: dir + sep + '/nonexistent' })).toBe(process.platform !== 'win32' ? true : false)
+      expect(await programsAvailable({ PATH: dir + sep + '/nonexistent' })).toBe(true)
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
