@@ -39,6 +39,8 @@ export interface ExtractRunners {
   /** OCR картинки или скана PDF (tesseract rus+bel+kaz+eng). */
   ocr: (path: string, signal: AbortSignal) => Promise<OcrOutput>
   /** HTML → PDF или DOCX через LibreOffice Writer (сборка документов: КП помощника). */
+  /** Готовность: все программы разбора на месте (для /health). Нет — считается, что готовы. */
+  programs?: () => Promise<boolean>
   htmlConvert?: (path: string, to: ConvertTo, signal: AbortSignal) => Promise<Buffer>
 }
 

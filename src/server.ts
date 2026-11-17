@@ -4,6 +4,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { checkBearer } from './auth.ts'
+import { createMetrics, type Metrics } from './metrics.ts'
 import { cacheKey, type CacheStore } from './cache.ts'
 import { CACHE_TTL_SEC, EXTRACTOR_VERSION, type Config } from './config.ts'
 import { ExtractError } from './errors.ts'
@@ -38,6 +39,7 @@ export interface AppDeps {
   /** Зрение (VISION_URL): описание картинки; нет — картинки только с текстом OCR. */
   describe?: DescribeImage
   limiter?: Limiter
+  metrics?: Metrics
   now?: () => number
 }
 
@@ -144,6 +146,7 @@ export function createApp(deps: AppDeps): Server {
   const { config, runners, cache, log, describe } = deps
   const limiter = deps.limiter ?? new Limiter(config.maxConcurrency, config.queueTimeoutMs, config.maxQueue)
   const now = deps.now ?? Date.now
+  const metrics = deps.metrics ?? createMetrics()
   // Сколько запросов одновременно держат тело в памяти (читают, ждут места или разбираются). Тело — до
   // MAX_FILE_BYTES, поэтому без предела очередь копила бы гигабайты. Предел — разборы + очередь; картинки,
   // ждущие только зрения, сверх него — их держит очередь зрения (до 3 тел, VISION_MAX_QUEUE + 1).
@@ -270,7 +273,8 @@ export function createApp(deps: AppDeps): Server {
       const hit = await cache.get(key).catch(() => null) // недоступный кеш — не повод отказать
       // испорченная запись кеша (обрыв записи на диск, чужое значение в Redis) — как промах, а не 500 на сутки
       const parsed = hit ? safeParse(hit) : null
-      if (parsed) return { ...parsed, cached: true }
+      if (parsed) { metrics.cacheHit(); return { ...parsed, cached: true } }
+      metrics.cacheMiss()
 
       // Сам разбор — один на всех, кто прислал тот же файл (тот же ключ кеша). signal — отмена, когда ушли ВСЕ ждущие.
       // Зрение — с получением места разбора (не дали места — зрение не начинается), параллельно с OCR и своим
@@ -330,6 +334,7 @@ export function createApp(deps: AppDeps): Server {
       const running = flights.get(key)
       if (running) {
         ctx.shared = true
+        metrics.shared()
         return { ...(await awaitFlight(running, signal)), cached: false }
       }
       return { ...(await awaitFlight(startFlight(key, compute), signal)), cached: false }
@@ -402,6 +407,16 @@ export function createApp(deps: AppDeps): Server {
     }
   }
 
+  /** Готовность: программы разбора на месте и кеш пригоден. Недоступный кеш разбор не останавливает (отдаёт без кеша),
+   *  но сообщается — это деградация. Проверки с потолком времени: зависший Redis не должен вешать /health. */
+  async function readiness(): Promise<{ ok: boolean, programs: boolean, cache: boolean }> {
+    const within = (p: Promise<boolean> | undefined): Promise<boolean> => p
+      ? Promise.race([p.catch(() => false), new Promise<boolean>(r => setTimeout(() => r(false), 2_000).unref())])
+      : Promise.resolve(true)
+    const [programs, cacheOk] = await Promise.all([within(runners.programs?.()), within(cache.ping?.())])
+    return { ok: programs && cacheOk, programs, cache: cacheOk }
+  }
+
   const server = createServer((req, res) => {
     function replyError(e: unknown, evt: LogEntry['evt'], kind: string, started: number, ctx: Ctx): void {
       let status = 500
@@ -413,6 +428,7 @@ export function createApp(deps: AppDeps): Server {
         const m = EXTRACT_STATUS[e.code]
         status = m[0]; code = m[1]; message = e.message
       }
+      metrics.request(evt === 'convert' ? 'convert' : 'extract', status)
       log({ evt, kind, ms: now() - started, ...(ctx.queueMs !== undefined ? { queueMs: ctx.queueMs } : {}), ...(ctx.bytes !== undefined ? { bytes: ctx.bytes } : {}), error: code, ...(ctx.shared ? { shared: true } : {}), ...(status === 500 ? { errorClass: errorClassOf(e) } : {}) })
       if (code === 'client_aborted' || res.destroyed) {
         req.destroy()
@@ -434,6 +450,7 @@ export function createApp(deps: AppDeps): Server {
       const gone = new AbortController()
       res.on('close', () => { if (!res.writableFinished) gone.abort(clientAborted()) })
       handleConvert(req, query, gone.signal, ctx).then((out) => {
+        metrics.request('convert', 200)
         log({ evt: 'convert', kind: out.mime === 'application/pdf' ? 'pdf' : 'docx', ms: now() - started, bytes: ctx.bytes })
         if (res.destroyed) return
         res.writeHead(200, { 'content-type': out.mime, 'content-length': out.body.length, 'cache-control': 'no-store' })
@@ -443,7 +460,20 @@ export function createApp(deps: AppDeps): Server {
     }
     if (url === '/health') {
       if (req.method !== 'GET') { sendJson(res, 405, { error: 'method_not_allowed', message: 'нужен GET' }); return }
-      sendJson(res, 200, { ok: true, version: EXTRACTOR_VERSION })
+      // Живость (200 и версия) — как раньше, без ключа. Готовность — в теле: программы и кеш (только логические значения,
+      // без путей и версий). `?ready=1` — для проверок оркестратора: не готов — 503.
+      void readiness().then((ready) => {
+        const strict = new URLSearchParams(query).get('ready') === '1'
+        sendJson(res, strict && !ready.ok ? 503 : 200, { ok: true, version: EXTRACTOR_VERSION, ready: ready.ok, checks: { programs: ready.programs, cache: ready.cache } })
+      })
+      return
+    }
+    if (url === '/metrics') {
+      if (req.method !== 'GET') { sendJson(res, 405, { error: 'method_not_allowed', message: 'нужен GET' }); return }
+      if (!checkBearer(req.headers.authorization, config.apiKey)) { sendJson(res, 401, { error: 'unauthorized', message: 'неверный или отсутствующий ключ' }); return }
+      const text = metrics.render({ running: limiter.running, queued: limiter.queued, inflight, flights: flights.size })
+      res.writeHead(200, { 'content-type': 'text/plain; version=0.0.4; charset=utf-8', 'content-length': Buffer.byteLength(text), 'cache-control': 'no-store' })
+      res.end(text)
       return
     }
     if (url !== EXTRACT_PATH) {
@@ -466,6 +496,7 @@ export function createApp(deps: AppDeps): Server {
       ...(ctx.bytes !== undefined ? { bytes: ctx.bytes } : {})
     })
     handleExtract(req, gone.signal, ctx).then((out) => {
+      metrics.request('extract', 200)
       log({ evt: 'extract', kind: out.kind, ...timing(), sha: shortSha(out.sha256), cached: out.cached, ...(ctx.shared ? { shared: true } : {}) })
       if (!res.destroyed) sendJson(res, 200, out)
     }).catch((e: unknown) => replyError(e, 'extract', kind, started, ctx))
