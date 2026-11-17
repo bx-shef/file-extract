@@ -129,7 +129,7 @@ hits / (hits + misses)), `file_extract_queue_depth`, `file_extract_slots_running
 ### POST /v1/convert?to=pdf|docx — сборка документа
 
 Тело — HTML (UTF-8 без BOM, стили внутри, без внешних картинок: сети у контейнера нет) до 5 МБ,
-заголовок `Authorization: Bearer <EXTRACT_API_KEY>`. Ответ 200 — байты файла (`application/pdf` или
+заголовок `Authorization: Bearer <ключ потребителя>`. Ответ 200 — байты файла (`application/pdf` или
 Word `.docx`). Очередь, таймаут и потолок одновременных тел — общие с разбором; кеша нет. Сборка —
 LibreOffice Writer (`--infilter=HTML (StarWriter)`), профиль — тот же, что у разбора. Клиент —
 shef.cowork (`disk_doc_build`, КП помощника).
