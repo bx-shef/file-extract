@@ -20,6 +20,8 @@ hold LICENSE                        # лицензия репозитория �
 # --- уровень 2: двое проверяющих; панель из пяти — только деньги и лицензии ------------------------
 # образ и выкладка: digest, tini, программы разбора, сеть, права, лимиты
 2 Dockerfile|.dockerignore|docker-compose.example.yml|.env.example
+# сканирование образа и цепочка поставок: скрипт, исключения сканера
+2 tools/scan-image.sh|.trivyignore
 # сборка и зависимости: CI, lock-файл
 2 .github/*|package.json|pnpm-lock.yaml
 # ключ, HTTP-контракт, настройки, кеш, запуск внешних программ, журнал, коды ошибок, проверка HTML для сборки
@@ -49,6 +51,8 @@ case 1 src/main.ts
 case 1 tsconfig.json
 case 1 vitest.config.ts
 case 2 tools/review-tier.sh
+case 2 tools/scan-image.sh
+case 2 .trivyignore
 case 2 tools/review-tier.rules
 case 2 tools/review-tier.md           # .md с именем движка: «2 tools/review-tier.*» стоит выше «0 *.md»
 case 2 tests/reviewTier.test.ts       # тест-страж стоит выше «0 tests/*»

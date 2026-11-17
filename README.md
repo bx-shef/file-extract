@@ -154,6 +154,25 @@ HTML сперва проверяется и пересобирается (`src/h
 | 503 | `busy` | очередь полна (`MAX_QUEUE`) или не дождалась места за `QUEUE_TIMEOUT_MS` |
 | 504 | `timeout` | сборка не уложилась в `EXTRACT_TIMEOUT_MS` |
 
+## Сканирование образа и цепочка поставок
+
+- **Сканер (Trivy)** — `tools/scan-image.sh <образ> [каталог]`: образ сохраняется в tar и сканируется контейнером Trivy
+  (закреплён по digest, сокет Docker внутрь не отдаётся), результат — `report.txt` и **SBOM** `sbom.cdx.json`
+  (CycloneDX). Порог — HIGH и CRITICAL, у которых уже есть исправление (`SCAN_SEVERITY`); код выхода 1 при находках
+  (`SCAN_EXIT=0` — только отчёт). Исключения — `.trivyignore` с причиной и сроком пересмотра (до 90 дней).
+  Руками на машине разработки: `docker build -t file-extract . && PW_RUN=../stand/tools/pw-run.sh bash tools/scan-image.sh file-extract`.
+- **CI** (`.github/workflows/ci.yml`): на PR и на push в `main` образ собирается локально и сканируется тем же скриптом, отчёт и SBOM
+  — артефакты прогона. Сейчас **только отчёт** (`SCAN_EXIT: '0'`): в базовом образе есть исправимые HIGH (первый прогон
+  17.11.2026: 12 — `apt` в Debian 12 и пакеты npm внутри `node:22-slim`: brace-expansion, ip-address, pacote, picomatch,
+  sigstore); перед включением падения базовый образ обновляют (Dependabot, digest). Включает владелец: `SCAN_EXIT: '1'`.
+  `.github/workflows/scan.yml` — раз в неделю и по кнопке сканирует опубликованный `latest` (падает при находках).
+- **Provenance и SBOM образа**: при публикации BuildKit кладёт в образ аттестации (`provenance: mode=max`, `sbom: true`) — откуда и из
+  чего собран. Посмотреть: `docker buildx imagetools inspect ghcr.io/bx-shef/file-extract:<sha> --format '{{ json .Provenance }}'`
+  и `--format '{{ json .SBOM }}'`. В списке версий пакета ghcr появятся записи `unknown/unknown` — это аттестации, не отдельные
+  образы; закрепление по тегу `<sha>` (`FILE_EXTRACT_TAG`) работает как прежде. Подпись (cosign, attest-build-provenance) не добавлена — вопрос владельцу.
+- Ограничение: при публикации сканируется одна сборка образа, а в ghcr уходит вторая (слои из кеша buildx, но digest не привязан к просканированному); привязать скан к digest — при включении падения (`SCAN_EXIT: '1'`).
+- GitHub Actions у владельца выключены (биллинг): все эти проверки руками — скрипт выше, workflow `workflow_dispatch`.
+
 ## Настройки (env)
 
 | Переменная | По умолчанию | Что значит |
