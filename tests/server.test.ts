@@ -1020,6 +1020,8 @@ describe('HTTP: готовность и метрики (#38)', () => {
     expect(t).toMatch(/file_extract_cache_misses_total [2-9]/)
     expect(t).not.toContain('Иванов')
     expect(t).not.toContain(KEY)
+  })
+})
 
 describe('HTTP: ключи потребителей (#36)', () => {
   const KA = 'mcp-key-0123456789abcdef'
@@ -1053,6 +1055,11 @@ describe('HTTP: ключи потребителей (#36)', () => {
     const other = await (await post(base, KB, 'тот же файл')).json() as any
     expect([first.cached, again.cached, other.cached]).toEqual([false, true, false])
     expect(runners.readText).toHaveBeenCalledTimes(2)
+  })
+  it('/metrics: ключ любого потребителя пускает, чужой — 401', async () => {
+    const { base } = await start({ config: { consumers } })
+    expect((await fetch(base + '/metrics', { headers: { authorization: 'Bearer ' + KB } })).status).toBe(200)
+    expect((await fetch(base + '/metrics', { headers: { authorization: 'Bearer nope-nope-nope-nope-1' } })).status).toBe(401)
   })
   it('сборка документа: метка потребителя в журнале, чужой ключ — 401', async () => {
     const logs: LogEntry[] = []
